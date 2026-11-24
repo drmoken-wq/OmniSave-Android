@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 PORT = 8000
-VERSION = "v20.17"
+VERSION = "v20.18"
 
 
 def _resolve_app_data_dir() -> Path:
@@ -121,15 +121,20 @@ _YTDLP_USE_CLI_ONLY = False
 _YTDLP_IMPORT_LOCK = threading.Lock()
 
 
+_LAST_YT_WARN = ""
+
+
 class _SilentYtdlpLogger:
     def __init__(self):
         self.errors = []
+        self.warnings = []
 
     def debug(self, msg):
         pass
 
     def warning(self, msg):
-        pass
+        if msg:
+            self.warnings.append(str(msg))
 
     def error(self, msg):
         if msg:
@@ -939,7 +944,7 @@ HTML = r"""<!doctype html>
       <div class="logo">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </div>
-      <h1 class="brand-name">OmniSave <span class="ver">v20.17</span></h1>
+      <h1 class="brand-name">OmniSave <span class="ver">v20.18</span></h1>
     </div>
     <div class="top-actions">
       <button id="acctBtn" class="icon-pill" type="button" title="Sign In (Facebook / Instagram / YouTube)" aria-label="Accounts" style="display:none">
@@ -2096,7 +2101,7 @@ HTML = r"""<!doctype html>
           ? (" · Desktop (" + (d.os_name || "PC") + ")")
           : (" · Gallery Sync " + (d.media_scan ? "Auto" : "Manual"));
         var ffTxt = d.ffmpeg ? "OK" : ("Missing" + (d.ffmpeg_diag ? (" (" + d.ffmpeg_diag + ")") : ""));
-        var jsTxt = d.js_runtime ? (" · JS (" + (d.js_runtime_name || "OK") + ")") : " · JS Off";
+        var jsTxt = d.js_runtime ? (" · JS (" + (d.js_runtime_name || "OK") + ")") : (" · JS Off" + (d.js_runtime_diag ? (" (" + d.js_runtime_diag + ")") : ""));
         $("engVer").textContent = "yt-dlp " + (d.ytdlp_version || "unknown") + " · FFmpeg " + ffTxt + jsTxt + syncPart;
 
         $("ckToggle").checked = !!d.use_cookies;
@@ -2592,13 +2597,15 @@ HTML = r"""<!doctype html>
     };
   }
 
-  // Init quiet status checks + load any active/recent downloads (including from Quick Share sheet!)
-  refreshSettingsUI();
-  refreshJobsQueue();
-  fetch("/api/wa/list", {cache: "no-store"})
-    .then(function(r){ return r.json(); })
-    .then(function(d){ if(d && d.items){ waItems = d.items; updateWaCountBadge(); } })
-    .catch(function(){});
+  // Init quiet status checks (skip in Quick Share overlay so Fetch gets 100% instant priority!)
+  if(!isQuickMode){
+    refreshSettingsUI();
+    refreshJobsQueue();
+    fetch("/api/wa/list", {cache: "no-store"})
+      .then(function(r){ return r.json(); })
+      .then(function(d){ if(d && d.items){ waItems = d.items; updateWaCountBadge(); } })
+      .catch(function(){});
+  }
 
   // Auto-load & fetch shared URL when opened via Share -> Termux (?url=...)
   try {
@@ -2874,23 +2881,40 @@ def _probe_qjs_executable(qjs_path: Path) -> tuple:
             timeout=10,
             **_win_popen_kwargs(),
         )
-        if p.returncode == 0 and "42" in (p.stdout or ""):
-            return True, "QuickJS OK"
-        # Fallback syntax check (older bellard qjs uses print())
-        p2 = subprocess.run(
-            [str(qjs_path), "-e", "print(40+2)"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=clean_env(),
-            timeout=10,
-            **_win_popen_kwargs(),
-        )
-        if p2.returncode == 0 and "42" in (p2.stdout or ""):
-            return True, "QuickJS OK"
-        err = (p.stderr or p2.stderr or f"rc={p.returncode}").strip().splitlines()
-        return False, (err[0][:100] if err else f"rc={p.returncode}")
+        ok_eval = (p.returncode == 0 and "42" in (p.stdout or ""))
+        if not ok_eval:
+            p2 = subprocess.run(
+                [str(qjs_path), "-e", "print(40+2)"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=clean_env(),
+                timeout=10,
+                **_win_popen_kwargs(),
+            )
+            ok_eval = (p2.returncode == 0 and "42" in (p2.stdout or ""))
+            if not ok_eval:
+                err = (p.stderr or p2.stderr or f"rc={p.returncode}").strip().splitlines()
+                return False, (err[0][:100] if err else f"rc={p.returncode}")
+        banner = "QuickJS OK"
+        try:
+            ph = subprocess.run(
+                [str(qjs_path), "--help"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=clean_env(),
+                timeout=6,
+                **_win_popen_kwargs(),
+            )
+            first_ln = ((ph.stdout or "") + "\n" + (ph.stderr or "")).strip().splitlines()
+            if first_ln:
+                banner = first_ln[0].strip()[:60]
+        except Exception:
+            pass
+        return True, banner
     except Exception as exc:
         return False, str(exc)[:100]
 
@@ -5990,8 +6014,7 @@ def _run_ytdlp_info_inprocess(ymod, url: str, allow_playlist: bool, use_cookies:
     js_rt = _get_js_runtime_opts()
     if js_rt:
         ydl_opts["js_runtimes"] = js_rt
-        if not _has_local_ejs():
-            ydl_opts["remote_components"] = ["ejs:github"]
+        ydl_opts["remote_components"] = ["ejs:github"]
 
     ck_cli = get_ytdlp_cookie_cli_args(use_cookies)
     if len(ck_cli) >= 2:
@@ -6016,13 +6039,16 @@ def _run_ytdlp_info_inprocess(ymod, url: str, allow_playlist: bool, use_cookies:
         err_txt = str(exc).strip() or (logger.errors[-1] if logger.errors else "Failed to fetch metadata.")
         raise RuntimeError(err_txt)
 
+    if logger.warnings and _is_youtube_url(url):
+        global _LAST_YT_WARN
+        for _w in reversed(logger.warnings):
+            if any(k in _w.lower() for k in ("js", "javascript", "ejs", "quickjs", "challenge", "po token", "sabr", "skipped")):
+                _LAST_YT_WARN = _w.strip()[:140]
+                break
+    res_payload = _format_ytdlp_payload(data, url, referer=referer)
     if isinstance(data, dict) and data.get("formats"):
-        with RAW_INFO_CACHE_LOCK:
-            if len(RAW_INFO_CACHE) >= 24:
-                oldest_rk = min(RAW_INFO_CACHE.keys(), key=lambda k: RAW_INFO_CACHE[k][0])
-                RAW_INFO_CACHE.pop(oldest_rk, None)
-            RAW_INFO_CACHE[url] = (time.time(), data)
-    return _format_ytdlp_payload(data, url, referer=referer)
+        res_payload["_raw_data"] = data
+    return res_payload
 
 
 def _run_ytdlp_info_raw(url: str, allow_playlist: bool, use_cookies: bool, referer: str = "", extra_args: list = None):
@@ -6073,13 +6099,10 @@ def _run_ytdlp_info_raw(url: str, allow_playlist: bool, use_cookies: bool, refer
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "Failed to fetch metadata.")
     data = json.loads(proc.stdout)
+    res_payload = _format_ytdlp_payload(data, url, referer=referer)
     if isinstance(data, dict) and data.get("formats"):
-        with RAW_INFO_CACHE_LOCK:
-            if len(RAW_INFO_CACHE) >= 24:
-                oldest_rk = min(RAW_INFO_CACHE.keys(), key=lambda k: RAW_INFO_CACHE[k][0])
-                RAW_INFO_CACHE.pop(oldest_rk, None)
-            RAW_INFO_CACHE[url] = (time.time(), data)
-    return _format_ytdlp_payload(data, url, referer=referer)
+        res_payload["_raw_data"] = data
+    return res_payload
 
 
 def run_info(raw_input: str, referer: str = "", extra_cookies: str = "", title_hint: str = "", force: bool = False):
@@ -6095,6 +6118,15 @@ def run_info(raw_input: str, referer: str = "", extra_cookies: str = "", title_h
                 return json.loads(json.dumps(cached[1]))
 
     res = _run_info_uncached(url, referer=referer, extra_cookies=extra_cookies, title_hint=title_hint)
+
+    if isinstance(res, dict):
+        raw_d = res.pop("_raw_data", None)
+        if isinstance(raw_d, dict) and raw_d.get("formats"):
+            with RAW_INFO_CACHE_LOCK:
+                if len(RAW_INFO_CACHE) >= 24:
+                    oldest_rk = min(RAW_INFO_CACHE.keys(), key=lambda k: RAW_INFO_CACHE[k][0])
+                    RAW_INFO_CACHE.pop(oldest_rk, None)
+                RAW_INFO_CACHE[url] = (time.time(), raw_d)
 
     if res and not extra_cookies:
         with INFO_CACHE_LOCK:
@@ -6180,19 +6212,17 @@ def _run_info_uncached(url: str, referer: str = "", extra_cookies: str = "", tit
             best_yt_candidate = cand
             best_yt_score = sc
 
-    # Stage 1: Primary yt-dlp extraction
-    # On mobile YouTube (single video, not playlist), try fast zero-JS `android_vr` first (~0.8s!):
-    # if it already returns >=720p HD, skip heavy QuickJS solving completely!
-    # Otherwise immediately fall through to full QuickJS-powered default client for 1080p/720p!
+    # Stage 1: Single-call primary yt-dlp extraction!
+    # With QuickJS-NG active, yt-dlp's default clients fetch ALL qualities (4K/1080p/720p/480p/360p) in ONE fast call
+    # and cache the solved player.js in ytdlp_cache so subsequent fetches run in ~1.5-2s!
     no_js_yt = is_yt and (not _has_js_runtime())
-    fast_mobile_yt = is_yt and _is_mobile_env() and (not allow_pl)
     first_use_ck = False if is_yt else use_ck
-    if fast_mobile_yt:
-        first_extra = ["--extractor-args", "youtube:player_client=android_vr;skip=translated_subs"]
-    elif no_js_yt:
-        first_extra = ["--extractor-args", "youtube:player_client=android_vr,ios,tv_simply;skip=translated_subs"]
+    if no_js_yt:
+        first_extra = ["--extractor-args", "youtube:player_client=android_vr,ios,tv_simply,web_safari;skip=translated_subs"]
+    elif is_yt:
+        first_extra = ["--extractor-args", "youtube:skip=translated_subs"]
     else:
-        first_extra = ["--extractor-args", "youtube:skip=translated_subs"] if is_yt else None
+        first_extra = None
     try:
         cand1 = _run_ytdlp_info_raw(url, allow_playlist=allow_pl, use_cookies=first_use_ck, extra_args=first_extra)
         if is_yt:
@@ -6204,38 +6234,26 @@ def _run_info_uncached(url: str, referer: str = "", extra_cookies: str = "", tit
     except Exception as exc:
         last_error = str(exc)
 
-    # Stage 1.5 (YouTube): If Stage 1 failed OR only returned <=360p, run QuickJS-powered client for full HD!
+    # Stage 1.5 (YouTube): At most ONE fast fallback call only if Stage 1 failed or returned <=360p!
     if ytdlp_res is None and is_yt:
-        if no_js_yt:
-            yt_fallback_clients = [
-                ["--extractor-args", "youtube:player_client=ios,tv_simply,web_safari;skip=translated_subs"],
-                ["--extractor-args", "youtube:player_client=android,web;skip=translated_subs"],
-            ]
-        elif fast_mobile_yt:
-            yt_fallback_clients = [
-                ["--extractor-args", "youtube:player_client=web,web_safari;skip=translated_subs"],
-                ["--extractor-args", "youtube:player_client=tv,ios;skip=translated_subs"],
-            ]
-        else:
-            yt_fallback_clients = [
-                ["--extractor-args", "youtube:player_client=android_vr,tv,web_safari,ios;skip=translated_subs"],
-                ["--extractor-args", "youtube:player_client=web,mweb;skip=translated_subs"],
-            ]
-        for yt_extra in yt_fallback_clients:
-            try:
-                cand_fb = _run_ytdlp_info_raw(
-                    url,
-                    allow_playlist=allow_pl,
-                    use_cookies=False,
-                    extra_args=yt_extra,
-                )
-                _consider_yt(cand_fb)
-                if _ytdlp_has_hd_or_multi(cand_fb):
-                    ytdlp_res = cand_fb
-                    break
-            except Exception as exc:
-                if not last_error:
-                    last_error = str(exc)
+        fb_spec = (
+            "youtube:player_client=android,tv,web;skip=translated_subs"
+            if no_js_yt
+            else "youtube:player_client=android_vr,web_safari,tv;skip=translated_subs"
+        )
+        try:
+            cand_fb = _run_ytdlp_info_raw(
+                url,
+                allow_playlist=allow_pl,
+                use_cookies=False,
+                extra_args=["--extractor-args", fb_spec],
+            )
+            _consider_yt(cand_fb)
+            if _ytdlp_has_hd_or_multi(cand_fb):
+                ytdlp_res = cand_fb
+        except Exception as exc:
+            if not last_error:
+                last_error = str(exc)
 
     # Stage 2: Toggle cookies fallback (with cookies on YT for age-gated/private/HD; without cookies on other sites)
     if ytdlp_res is None and use_ck and not (_is_facebook_url(url) and "/stories/" in url.lower()):
@@ -7896,8 +7914,7 @@ def start_download_job(
         js_rt = _get_js_runtime_opts()
         if js_rt:
             ydl_opts["js_runtimes"] = js_rt
-            if not _has_local_ejs():
-                ydl_opts["remote_components"] = ["ejs:github"]
+            ydl_opts["remote_components"] = ["ejs:github"]
 
         if use_ck_flag:
             ck_cli = get_ytdlp_cookie_cli_args(True)
@@ -8161,8 +8178,8 @@ def start_download_job(
                     base_h = dict(cached_streams.get("base_headers") or {})
                     v_hdrs = dict(base_h)
                     v_hdrs.update(v_f.get("http_headers") or {})
-                    v_sz = int(safe_float(v_f.get("filesize")) or safe_float(v_f.get("filesize_approx")) or _gdrive_clen_from_url(v_f["url"]) or 0)
-                    a_sz = int(safe_float(a_f.get("filesize")) or safe_float(a_f.get("filesize_approx")) or _gdrive_clen_from_url(a_f["url"]) or 0) if a_f else 0
+                    v_sz = int(safe_float(v_f.get("filesize")) or _gdrive_clen_from_url(v_f["url"]) or 0)
+                    a_sz = int(safe_float(a_f.get("filesize")) or _gdrive_clen_from_url(a_f["url"]) or 0) if a_f else 0
                     grand_tot = v_sz + a_sz
 
                     safe_base = sanitize_filename(filename_hint or cached_streams.get("title") or "video", f"video_{int(time.time())}")
@@ -8877,6 +8894,7 @@ class Handler(BaseHTTPRequestHandler):
                 "js_runtime": _has_js_runtime(),
                 "js_runtime_name": next(iter(_get_js_runtime_opts().keys()), ""),
                 "js_runtime_diag": _ANDROID_QJS_DIAG,
+                "last_yt_warn": _LAST_YT_WARN,
                 "media_scan": bool(_is_android_app() or shutil.which("termux-media-scan")),
                 "is_android_app": _is_android_app(),
                 "fb_cookies": _has_facebook_auth_cookies(),
