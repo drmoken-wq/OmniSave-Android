@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.OmniSave" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowBackground">#09090F</item>
+        <item name="android:statusBarColor">#09090F</item>
+        <item name="android:navigationBarColor">#09090F</item>
+        <item name="colorPrimary">#8B5CF6</item>
+        <item name="colorPrimaryVariant">#6366F1</item>
+        <item name="colorSecondary">#06B6D4</item>
+    </style>
+</resources>
