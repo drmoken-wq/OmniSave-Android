@@ -12,8 +12,8 @@ android {
         applicationId = "com.omnisave.studio"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "20.13"
+        versionCode = 4
+        versionName = "20.15"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

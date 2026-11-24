@@ -3,6 +3,8 @@ package com.omnisave.studio
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -36,6 +38,8 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -186,6 +190,13 @@ class MainActivity : AppCompatActivity() {
         waitForServerAndLoad()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (serverReady && ::webView.isInitialized) {
+            webView.evaluateJavascript("window.__refreshOmniQueue && window.__refreshOmniQueue();", null)
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -308,6 +319,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     inner class WebAppBridge {
+        @JavascriptInterface
+        fun getClipboardText(): String {
+            val latch = CountDownLatch(1)
+            var result = ""
+            runOnUiThread {
+                try {
+                    val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    val clip = cm?.primaryClip
+                    if (clip != null && clip.itemCount > 0) {
+                        result = clip.getItemAt(0).coerceToText(this@MainActivity)?.toString() ?: ""
+                    }
+                } catch (_: Exception) {
+                } finally {
+                    latch.countDown()
+                }
+            }
+            try {
+                latch.await(1500, TimeUnit.MILLISECONDS)
+            } catch (_: Exception) {
+            }
+            return result
+        }
+
         @JavascriptInterface
         fun openCookieLogin(site: String) {
             runOnUiThread {

@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 PORT = 8000
-VERSION = "v20.13"
+VERSION = "v20.15"
 
 
 def _resolve_app_data_dir() -> Path:
@@ -827,6 +827,76 @@ HTML = r"""<!doctype html>
     color:var(--muted);font-size:11.5px;font-weight:700;cursor:pointer;
     text-decoration:underline;display:none;
   }
+
+  /* Live Multi-Download Queue */
+  body.quick-mode #queueSec{display:none !important}
+  .queue-sec{
+    display:none;
+    margin-top:18px;
+    padding-top:16px;
+    border-top:1px solid var(--border);
+  }
+  .queue-head{
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:10px;gap:8px;
+  }
+  .queue-title{
+    font-size:11.5px;font-weight:800;text-transform:uppercase;
+    letter-spacing:.65px;color:var(--muted);
+    display:flex;align-items:center;gap:7px;
+  }
+  .queue-count{
+    padding:2px 8px;border-radius:999px;font-size:10.5px;
+    background:var(--chip-active-bg);color:var(--txt);
+    border:1px solid var(--chip-active-border);
+    font-variant-numeric:tabular-nums;
+  }
+  .queue-clear{
+    border:1px solid var(--border);background:var(--surface);color:var(--txt-soft);
+    font-size:11.5px;font-weight:700;cursor:pointer;padding:5px 10px;border-radius:9px;
+  }
+  .queue-list{display:flex;flex-direction:column;gap:10px}
+  .job-card{
+    padding:12px 13px;border-radius:16px;
+    background:var(--surface);border:1px solid var(--border);
+    animation:fadeUp .22s ease;
+  }
+  .job-card.running{border-color:var(--chip-active-border);background:var(--glass-strong)}
+  .job-card.done{border-color:var(--ok-border)}
+  .job-card.error{border-color:var(--err-border)}
+  .job-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+  .job-name{
+    font-size:13px;font-weight:700;color:var(--txt);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;
+  }
+  .job-pct{
+    font-size:13px;font-weight:800;color:var(--accent2);
+    font-variant-numeric:tabular-nums;flex-shrink:0;
+  }
+  .job-card.done .job-pct{color:var(--ok-txt)}
+  .job-card.error .job-pct{color:var(--err-txt)}
+  .job-bar{height:6px;border-radius:999px;background:var(--surface-hover);overflow:hidden;margin-bottom:8px}
+  .job-fill{height:100%;width:0%;border-radius:999px;background:var(--dl-grad);transition:width .25s ease}
+  .job-card.error .job-fill{background:#f43f5e}
+  .job-meta{
+    display:flex;align-items:center;justify-content:space-between;gap:8px;
+    font-size:11.5px;color:var(--muted);font-weight:600;flex-wrap:wrap;
+  }
+  .job-stage{flex:1;min-width:120px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .job-stats{flex-shrink:0;font-variant-numeric:tabular-nums;color:var(--txt-soft)}
+  .job-err{
+    margin-top:8px;padding:8px 10px;border-radius:10px;
+    background:var(--err-bg);border:1px solid var(--err-border);
+    font-size:11.5px;color:var(--err-txt);line-height:1.45;word-break:break-word;
+  }
+  .job-acts{display:flex;gap:7px;margin-top:10px;flex-wrap:wrap}
+  .job-btn{
+    height:34px;padding:0 13px;border-radius:10px;font-size:12px;font-weight:700;
+    cursor:pointer;border:1px solid var(--border);background:var(--surface-hover);
+    color:var(--txt);text-decoration:none;display:inline-flex;align-items:center;justify-content:center;
+  }
+  .job-btn.primary{background:var(--dl-grad);border:none;color:#fff}
+  .job-btn.cancel{border-color:var(--err-border);background:var(--err-bg);color:var(--err-txt)}
 </style>
 </head>
 <body>
@@ -850,7 +920,7 @@ HTML = r"""<!doctype html>
       <div class="logo">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </div>
-      <h1 class="brand-name">OmniSave <span class="ver">v20.13</span></h1>
+      <h1 class="brand-name">OmniSave <span class="ver">v20.15</span></h1>
     </div>
     <div class="top-actions">
       <button id="acctBtn" class="icon-pill" type="button" title="Sign In (Facebook / Instagram / YouTube)" aria-label="Accounts" style="display:none">
@@ -992,6 +1062,14 @@ HTML = r"""<!doctype html>
         <button class="btn-secondary quick-site-login" data-site="youtube" type="button">Sign in YouTube</button>
         <button class="btn-secondary quick-site-login" data-site="tiktok" type="button">Sign in TikTok</button>
       </div>
+
+      <section id="queueSec" class="queue-sec">
+        <div class="queue-head">
+          <span class="queue-title">Downloads <span id="queueCount" class="queue-count">0</span></span>
+          <button id="clearDoneBtn" class="queue-clear" type="button" style="display:none">Clear Finished</button>
+        </div>
+        <div id="queueList" class="queue-list"></div>
+      </section>
     </div>
 
     <!-- TAB 2: WHATSAPP STATUS -->
@@ -1494,15 +1572,30 @@ HTML = r"""<!doctype html>
     $("openFolderBtn").style.display = "none";
   }
 
+  function applyPastedText(raw){
+    var txt = (raw || "").trim();
+    if(!txt){
+      setStatus("info", "Clipboard is empty.");
+      return;
+    }
+    resetMediaState();
+    $("preview").style.display = "none";
+    $("url").value = txt;
+    clearStatus();
+    $("url").focus();
+  }
+
   $("pasteBtn").onclick = function(){
+    if(window.OmniSaveAndroid && window.OmniSaveAndroid.getClipboardText){
+      try {
+        var nativeClip = window.OmniSaveAndroid.getClipboardText();
+        applyPastedText(nativeClip);
+        return;
+      } catch(e) {}
+    }
     if(navigator.clipboard && navigator.clipboard.readText){
       navigator.clipboard.readText().then(function(t){
-        if(t){
-          resetMediaState();
-          $("preview").style.display = "none";
-          $("url").value = t.trim();
-          $("url").focus();
-        }
+        applyPastedText(t);
       }).catch(function(){ setStatus("info", "Long-press input to paste."); });
     } else {
       setStatus("info", "Long-press input to paste.");
@@ -1603,19 +1696,228 @@ HTML = r"""<!doctype html>
     .finally(function(){ setInspectBusy(false); });
   };
 
+  var queuePollTimer = null;
+
+  function stopQueuePolling(){
+    if(queuePollTimer){ clearTimeout(queuePollTimer); queuePollTimer = null; }
+  }
+
+  function renderJobsQueue(jobs){
+    if(isQuickMode) return;
+    var sec = $("queueSec");
+    var listEl = $("queueList");
+    if(!sec || !listEl) return;
+    if(!jobs || !jobs.length){
+      sec.style.display = "none";
+      listEl.innerHTML = "";
+      return;
+    }
+
+    sec.style.display = "block";
+    var runningCnt = 0;
+    var finishedCnt = 0;
+    for(var i = 0; i < jobs.length; i++){
+      var st = jobs[i].status;
+      if(st === "starting" || st === "downloading" || st === "postprocessing") runningCnt++;
+      else finishedCnt++;
+    }
+    $("queueCount").textContent = runningCnt > 0 ? (runningCnt + " active") : String(jobs.length);
+    $("clearDoneBtn").style.display = finishedCnt > 0 ? "inline-block" : "none";
+
+    listEl.innerHTML = "";
+    var isLocalHost = (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost");
+    var isAndroidBridge = !!(window.OmniSaveAndroid);
+
+    for(var k = 0; k < jobs.length; k++){
+      (function(job){
+        var isRunning = (job.status === "starting" || job.status === "downloading" || job.status === "postprocessing");
+        var isDone = (job.status === "done");
+        var isErr = (job.status === "error");
+
+        var card = document.createElement("div");
+        card.className = "job-card " + (isRunning ? "running" : (isDone ? "done" : (isErr ? "error" : "")));
+
+        var top = document.createElement("div");
+        top.className = "job-top";
+
+        var nm = document.createElement("div");
+        nm.className = "job-name";
+        nm.textContent = job.title || job.filename || "Download";
+        top.appendChild(nm);
+
+        var pctEl = document.createElement("div");
+        pctEl.className = "job-pct";
+        var pct = typeof job.percent === "number" ? job.percent : 0;
+        if(pct < 0) pct = 0;
+        if(pct > 100) pct = 100;
+        pctEl.textContent = isDone ? "Done ✓" : (isErr ? "Failed ✕" : (job.status === "cancelled" ? "Cancelled" : (pct.toFixed(0) + "%")));
+        top.appendChild(pctEl);
+        card.appendChild(top);
+
+        var bar = document.createElement("div");
+        bar.className = "job-bar";
+        var fill = document.createElement("div");
+        fill.className = "job-fill";
+        fill.style.width = (isDone ? 100 : pct) + "%";
+        bar.appendChild(fill);
+        card.appendChild(bar);
+
+        var metaRow = document.createElement("div");
+        metaRow.className = "job-meta";
+
+        var stg = document.createElement("span");
+        stg.className = "job-stage";
+        if(isDone){
+          stg.textContent = job.filename ? ("Saved: " + job.filename) : ("Saved to " + (job.saved_to || "Downloads"));
+        } else {
+          stg.textContent = (job.quality_label ? (job.quality_label + " · ") : "") + (job.stage || "Downloading...");
+        }
+        metaRow.appendChild(stg);
+
+        var stats = document.createElement("span");
+        stats.className = "job-stats";
+        if(isRunning){
+          var szTxt = job.total_text ? ((job.downloaded_text || "0 MB") + " / " + job.total_text) : (job.downloaded_text || "0 MB");
+          var spd = (job.speed_text && job.speed_text !== "—") ? (" · " + job.speed_text) : "";
+          var eta = (job.eta_text && job.eta_text !== "—") ? (" · " + job.eta_text) : "";
+          stats.textContent = szTxt + spd + eta;
+        } else if(isDone && job.downloaded_text && job.downloaded_text !== "0 MB"){
+          stats.textContent = job.downloaded_text;
+        }
+        metaRow.appendChild(stats);
+        card.appendChild(metaRow);
+
+        if(isErr && job.error){
+          var errDiv = document.createElement("div");
+          errDiv.className = "job-err";
+          errDiv.textContent = job.error;
+          card.appendChild(errDiv);
+        }
+
+        var acts = document.createElement("div");
+        acts.className = "job-acts";
+
+        if(isRunning){
+          var cBtn = document.createElement("button");
+          cBtn.type = "button";
+          cBtn.className = "job-btn cancel";
+          cBtn.textContent = "Cancel";
+          cBtn.onclick = function(){
+            cBtn.disabled = true;
+            fetch("/api/cancel", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({job_id: job.job_id})
+            }).finally(function(){ refreshJobsQueue(); });
+          };
+          acts.appendChild(cBtn);
+        } else if(isDone){
+          if(isAndroidBridge && job.filename && job.saved_to){
+            var fullPath = job.saved_to.replace(/\/+$/, "") + "/" + job.filename;
+            var openBtn = document.createElement("button");
+            openBtn.type = "button";
+            openBtn.className = "job-btn primary";
+            openBtn.textContent = "Open / Play";
+            openBtn.onclick = function(){ window.OmniSaveAndroid.openFile(fullPath); };
+            acts.appendChild(openBtn);
+
+            var shareBtn = document.createElement("button");
+            shareBtn.type = "button";
+            shareBtn.className = "job-btn";
+            shareBtn.textContent = "Share";
+            shareBtn.onclick = function(){ window.OmniSaveAndroid.shareFile(fullPath); };
+            acts.appendChild(shareBtn);
+          } else {
+            if(isDesktop && isLocalHost){
+              var foldBtn = document.createElement("button");
+              foldBtn.type = "button";
+              foldBtn.className = "job-btn";
+              foldBtn.textContent = "Open Folder";
+              foldBtn.onclick = function(){
+                fetch("/api/open-folder", {
+                  method: "POST",
+                  headers: {"Content-Type": "application/json"},
+                  body: JSON.stringify({path: job.saved_to || ""})
+                }).catch(function(){});
+              };
+              acts.appendChild(foldBtn);
+            }
+            if(job.has_file){
+              var dlLink = document.createElement("a");
+              dlLink.className = "job-btn primary";
+              dlLink.href = "/api/dl/file?id=" + encodeURIComponent(job.job_id) + "&_t=" + Date.now();
+              if(job.filename) dlLink.setAttribute("download", job.filename);
+              dlLink.textContent = isDesktop ? "Download File" : "Save to Gallery";
+              acts.appendChild(dlLink);
+            }
+          }
+        } else if((isErr || job.status === "cancelled") && job.retry_payload){
+          var rBtn = document.createElement("button");
+          rBtn.type = "button";
+          rBtn.className = "job-btn primary";
+          rBtn.textContent = "Retry";
+          rBtn.onclick = function(){
+            rBtn.disabled = true;
+            fetch("/api/download", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify(job.retry_payload)
+            }).finally(function(){ refreshJobsQueue(); });
+          };
+          acts.appendChild(rBtn);
+        }
+
+        if(acts.childNodes.length > 0){
+          card.appendChild(acts);
+        }
+        listEl.appendChild(card);
+      })(jobs[k]);
+    }
+  }
+
+  function refreshJobsQueue(){
+    if(isQuickMode) return;
+    fetch("/api/jobs", {cache: "no-store"})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var jobs = (d && d.jobs) ? d.jobs : [];
+        renderJobsQueue(jobs);
+        var hasRunning = jobs.some(function(j){
+          return j.status === "starting" || j.status === "downloading" || j.status === "postprocessing";
+        });
+        stopQueuePolling();
+        if(hasRunning){
+          queuePollTimer = setTimeout(refreshJobsQueue, 450);
+        }
+      })
+      .catch(function(){});
+  }
+
+  window.__refreshOmniQueue = refreshJobsQueue;
+  document.addEventListener("visibilitychange", function(){
+    if(!document.hidden && !isQuickMode){ refreshJobsQueue(); }
+  });
+  window.addEventListener("focus", function(){
+    if(!isQuickMode){ refreshJobsQueue(); }
+  });
+
+  if($("clearDoneBtn")){
+    $("clearDoneBtn").onclick = function(){
+      fetch("/api/jobs/clear", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: "{}"
+      }).finally(function(){ refreshJobsQueue(); });
+    };
+  }
+
   $("dlBtn").onclick = function(){
     var url = activeTargetUrl || ($("url").value || "").trim();
     if(!url){ setStatus("err", "URL is required."); return; }
-    stopPolling();
-    $("doneActions").style.display = "none";
-    $("syncGalleryBtn").style.display = "none";
-    $("openFolderBtn").style.display = "none";
-    setDownloadButtonsDisabled(true);
+    var origLbl = $("dlBtnText").textContent;
+    $("dlBtn").disabled = true;
+    $("dlBtnText").textContent = "Adding...";
     clearStatus();
-    updateProgressUI({
-      status: "starting", stage: "Starting...", percent: 0,
-      downloaded_text: "0 MB", total_text: "", speed_text: "—", eta_text: "—"
-    });
 
     fetch("/api/download", {
       method: "POST",
@@ -1647,12 +1949,15 @@ HTML = r"""<!doctype html>
         window.OmniSaveAndroid.dismissAfterDownload(ttl);
         return;
       }
-      activeJobId = d.job_id;
-      pollProgress(activeJobId);
+      $("progBox").style.display = "none";
+      $("dlBtn").disabled = false;
+      $("dlBtnText").textContent = "Added ✓";
+      setTimeout(function(){ $("dlBtnText").textContent = origLbl; }, 1200);
+      refreshJobsQueue();
     })
     .catch(function(e){
-      setDownloadButtonsDisabled(false);
-      $("progBox").style.display = "none";
+      $("dlBtn").disabled = false;
+      $("dlBtnText").textContent = origLbl;
       setStatus("err", e.message || String(e));
     });
   };
@@ -1712,7 +2017,8 @@ HTML = r"""<!doctype html>
         var syncPart = isDesktop
           ? (" · Desktop (" + (d.os_name || "PC") + ")")
           : (" · Gallery Sync " + (d.media_scan ? "Auto" : "Manual"));
-        $("engVer").textContent = "yt-dlp " + (d.ytdlp_version || "unknown") + " · FFmpeg " + (d.ffmpeg ? "OK" : "Missing") + syncPart;
+        var ffTxt = d.ffmpeg ? "OK" : ("Missing" + (d.ffmpeg_diag ? (" (" + d.ffmpeg_diag + ")") : ""));
+        $("engVer").textContent = "yt-dlp " + (d.ytdlp_version || "unknown") + " · FFmpeg " + ffTxt + syncPart;
 
         $("ckToggle").checked = !!d.use_cookies;
         $("cookieDot").style.display = (d.use_cookies && d.has_cookies) ? "block" : "none";
@@ -2207,8 +2513,9 @@ HTML = r"""<!doctype html>
     };
   }
 
-  // Init quiet status checks
+  // Init quiet status checks + load any active/recent downloads (including from Quick Share sheet!)
   refreshSettingsUI();
+  refreshJobsQueue();
   fetch("/api/wa/list", {cache: "no-store"})
     .then(function(r){ return r.json(); })
     .then(function(d){ if(d && d.items){ waItems = d.items; updateWaCountBadge(); } })
@@ -2467,19 +2774,80 @@ def _is_desktop_env() -> bool:
     return not _is_mobile_env()
 
 
+_ANDROID_FFMPEG_OK = False
+_ANDROID_FFMPEG_DIAG = ""
+
+
+def _has_js_runtime() -> bool:
+    return any(bool(shutil.which(b)) for b in ("deno", "node", "nodejs", "bun", "qjs"))
+
+
+def _probe_ffmpeg_executable(ff_path: Path) -> tuple:
+    if not ff_path or not ff_path.exists():
+        return False, "missing"
+    try:
+        p = subprocess.run(
+            [str(ff_path), "-version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=clean_env(),
+            timeout=10,
+            **_win_popen_kwargs(),
+        )
+        if p.returncode == 0 and ("ffmpeg version" in (p.stdout or "").lower() or "libav" in (p.stdout or "").lower()):
+            first_ln = (p.stdout or "").splitlines()[0].strip() if p.stdout else "OK"
+            return True, first_ln[:80]
+        err = (p.stderr or p.stdout or f"rc={p.returncode}").strip().splitlines()
+        return False, (err[0][:120] if err else f"rc={p.returncode}")
+    except Exception as exc:
+        return False, str(exc)[:120]
+
+
 def _setup_android_ffmpeg() -> str:
-    global _ANDROID_FFMPEG_DIR
+    global _ANDROID_FFMPEG_DIR, _ANDROID_FFMPEG_OK, _ANDROID_FFMPEG_DIAG
+    _ANDROID_FFMPEG_OK = False
+    _ANDROID_FFMPEG_DIAG = ""
+
     native_dir_s = (os.environ.get("OMNISAVE_NATIVE_LIB_DIR") or "").strip()
     if not native_dir_s:
         return ""
     native_dir = Path(native_dir_s)
     if not native_dir.exists():
+        _ANDROID_FFMPEG_DIAG = "nativeLibraryDir missing"
         return ""
 
-    # Ensure shared libraries bundled in nativeLibraryDir are discoverable by libffmpeg.so
+    ld_parts = [native_dir_s]
+
+    # If AAR bundled libffmpeg.zip.so alongside libffmpeg.so, extract any companion libs cleanly
+    zip_so = native_dir / "libffmpeg.zip.so"
+    if zip_so.exists():
+        import zipfile as _zf
+        pkg_dir = APP_DATA_DIR / "ffmpeg_pkg"
+        stamp_f = pkg_dir / ".stamp"
+        stamp_val = f"{zip_so.stat().st_size}:{int(zip_so.stat().st_mtime)}"
+        try:
+            need_extract = (not stamp_f.exists()) or (stamp_f.read_text(encoding="utf-8", errors="ignore").strip() != stamp_val)
+            if need_extract and _zf.is_zipfile(zip_so):
+                if pkg_dir.exists():
+                    shutil.rmtree(pkg_dir, ignore_errors=True)
+                pkg_dir.mkdir(parents=True, exist_ok=True)
+                with _zf.ZipFile(zip_so, "r") as zf_in:
+                    zf_in.extractall(pkg_dir)
+                stamp_f.write_text(stamp_val, encoding="utf-8")
+            for sub_lib in (pkg_dir / "usr" / "lib", pkg_dir / "lib"):
+                if sub_lib.exists():
+                    ld_parts.append(str(sub_lib))
+        except Exception:
+            pass
+
     cur_ld = os.environ.get("LD_LIBRARY_PATH") or ""
-    if native_dir_s not in cur_ld.split(":"):
-        os.environ["LD_LIBRARY_PATH"] = f"{native_dir_s}:{cur_ld}" if cur_ld else native_dir_s
+    existing_ld = [x for x in cur_ld.split(":") if x]
+    for lp in reversed(ld_parts):
+        if lp not in existing_ld:
+            existing_ld.insert(0, lp)
+    os.environ["LD_LIBRARY_PATH"] = ":".join(existing_ld)
 
     bin_dir = APP_DATA_DIR / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -2497,19 +2865,52 @@ def _setup_android_ffmpeg() -> str:
         except Exception:
             pass
 
-    if linked_any:
-        bin_s = str(bin_dir)
-        cur_path = os.environ.get("PATH") or ""
-        if bin_s not in cur_path.split(os.pathsep):
-            os.environ["PATH"] = f"{bin_s}{os.pathsep}{cur_path}" if cur_path else bin_s
+    if not linked_any:
+        _ANDROID_FFMPEG_DIAG = "libffmpeg.so not bundled"
+        return ""
+
+    bin_s = str(bin_dir)
+    cur_path = os.environ.get("PATH") or ""
+    if bin_s not in cur_path.split(os.pathsep):
+        os.environ["PATH"] = f"{bin_s}{os.pathsep}{cur_path}" if cur_path else bin_s
+
+    # Smoke-test the symlinked ffmpeg binary!
+    ok, diag = _probe_ffmpeg_executable(bin_dir / "ffmpeg")
+    if ok:
         _ANDROID_FFMPEG_DIR = bin_s
+        _ANDROID_FFMPEG_OK = True
+        _ANDROID_FFMPEG_DIAG = diag
         return bin_s
+
+    # Fallback probe directly on nativeLibraryDir/libffmpeg.so (in case SELinux blocks symlink exec)
+    ok_direct, diag_direct = _probe_ffmpeg_executable(native_dir / "libffmpeg.so")
+    if ok_direct:
+        _ANDROID_FFMPEG_DIR = str(native_dir / "libffmpeg.so")
+        _ANDROID_FFMPEG_OK = True
+        _ANDROID_FFMPEG_DIAG = diag_direct
+        return _ANDROID_FFMPEG_DIR
+
+    _ANDROID_FFMPEG_DIR = ""
+    _ANDROID_FFMPEG_OK = False
+    _ANDROID_FFMPEG_DIAG = diag or diag_direct or "exec failed"
     return ""
 
 
+def _is_ffmpeg_working() -> bool:
+    if _is_android_app():
+        if _ANDROID_FFMPEG_OK:
+            return True
+        if not _ANDROID_FFMPEG_DIAG:
+            _setup_android_ffmpeg()
+        return _ANDROID_FFMPEG_OK
+    return bool(shutil.which("ffmpeg"))
+
+
 def _get_ffmpeg_location() -> str:
-    if _ANDROID_FFMPEG_DIR and (Path(_ANDROID_FFMPEG_DIR) / "ffmpeg").exists():
-        return _ANDROID_FFMPEG_DIR
+    if _is_android_app():
+        if not _ANDROID_FFMPEG_OK and not _ANDROID_FFMPEG_DIAG:
+            _setup_android_ffmpeg()
+        return _ANDROID_FFMPEG_DIR if _ANDROID_FFMPEG_OK else ""
     ff = shutil.which("ffmpeg")
     if ff:
         return str(Path(ff).parent)
@@ -2526,24 +2927,75 @@ def _get_android_bridge():
         return None
 
 
-def _notify_android_progress(title: str, stage: str, percent: float, active: bool):
+def _active_jobs_count() -> int:
+    with JOBS_LOCK:
+        return sum(1 for j in JOBS.values() if j.get("status") in ("starting", "downloading", "postprocessing"))
+
+
+def _notify_android_engine_summary():
     br = _get_android_bridge()
     if br is None:
         return
     try:
-        br.onDownloadProgress(str(title or ""), str(stage or ""), int(round(percent or 0)), bool(active))
+        br.onEngineSummary(int(_active_jobs_count()))
     except Exception:
         pass
+
+
+def _notify_android_job_snapshot(job: dict):
+    br = _get_android_bridge()
+    if br is None or not job:
+        return
+    jid = str(job.get("job_id") or "")
+    if not jid:
+        return
+    status = job.get("status") or ""
+    title = str(job.get("title") or job.get("filename") or "Download")
+    stage = str(job.get("stage") or "Downloading...")
+    pct = int(round(safe_float(job.get("percent")) or 0))
+    dl_txt = str(job.get("downloaded_text") or "")
+    tot_txt = str(job.get("total_text") or "")
+    spd_txt = str(job.get("speed_text") or "")
+    eta_txt = str(job.get("eta_text") or "")
+
+    try:
+        if status in ("starting", "downloading", "postprocessing"):
+            parts = []
+            if tot_txt:
+                parts.append(f"{dl_txt or '0 MB'} / {tot_txt}")
+            elif dl_txt and dl_txt != "0 MB":
+                parts.append(dl_txt)
+            if spd_txt and spd_txt != "—":
+                parts.append(spd_txt)
+            if eta_txt and eta_txt != "—":
+                parts.append(f"ETA {eta_txt}")
+            subtext = " · ".join(parts) if parts else stage
+            br.onJobProgress(jid, title, stage, pct, subtext)
+            _notify_android_engine_summary()
+        elif status == "done":
+            fp = str(job.get("_filepath") or "")
+            sz = str(job.get("downloaded_text") or "")
+            br.onJobComplete(jid, title, fp, sz)
+            _notify_android_engine_summary()
+        elif status == "error":
+            err = str(job.get("error") or "Download failed")
+            br.onJobError(jid, title, err)
+            _notify_android_engine_summary()
+        elif status == "cancelled":
+            br.onJobCancelled(jid)
+            _notify_android_engine_summary()
+    except Exception:
+        pass
+
+
+def _notify_android_progress(title: str, stage: str, percent: float, active: bool):
+    # Kept as no-op wrapper because _update_job() now drives per-job notifications universally
+    pass
 
 
 def _notify_android_complete(title: str, filepath: str):
-    br = _get_android_bridge()
-    if br is None or not filepath:
-        return
-    try:
-        br.onDownloadComplete(str(title or ""), str(filepath))
-    except Exception:
-        pass
+    # Driven automatically by _update_job(..., status="done")
+    pass
 
 
 def detect_installed_browsers() -> list:
@@ -5332,6 +5784,7 @@ def _run_ytdlp_info_inprocess(ymod, url: str, allow_playlist: bool, use_cookies:
         "nocheckcertificate": True,
         "ignoreerrors": False,
         "logger": logger,
+        "cachedir": str(APP_DATA_DIR / "ytdlp_cache"),
         "noplaylist": not allow_playlist,
     }
     if _is_mobile_env():
@@ -5504,29 +5957,39 @@ def _run_info_uncached(url: str, referer: str = "", extra_cookies: str = "", tit
         return bool(real_v or res.get("audio_size"))
 
     # Stage 1: Primary yt-dlp extraction
-    # On YouTube/YT Music, try without cookies FIRST (Chrome cookies disable android_vr/tv clients & trigger SABR/PO-Token format errors on public videos)
+    # On YouTube without a JS runtime (e.g. Android Chaquopy APK), use pure android_vr first so fetched
+    # formats never rely on web n-challenge JS solving (which causes HTTP 403 Forbidden on download!).
+    no_js_yt = is_yt and (not _has_js_runtime())
     first_use_ck = False if is_yt else use_ck
+    first_extra = ["--extractor-args", "youtube:player_client=android_vr"] if no_js_yt else None
     try:
-        ytdlp_res = _run_ytdlp_info_raw(url, allow_playlist=allow_pl, use_cookies=first_use_ck)
+        ytdlp_res = _run_ytdlp_info_raw(url, allow_playlist=allow_pl, use_cookies=first_use_ck, extra_args=first_extra)
         if is_yt and not _ytdlp_has_playable_formats(ytdlp_res):
             ytdlp_res = None
     except Exception as exc:
         last_error = str(exc)
 
-    # Stage 1.5 (YouTube): Try cookie-less android_vr/tv client chain if default returned no playable formats
+    # Stage 1.5 (YouTube): Fallback clients (pure mobile clients first when no JS runtime, then tv/web)
     if ytdlp_res is None and is_yt:
-        try:
-            ytdlp_res = _run_ytdlp_info_raw(
-                url,
-                allow_playlist=allow_pl,
-                use_cookies=False,
-                extra_args=["--extractor-args", "youtube:player_client=android_vr,tv,web_safari,web"],
-            )
-            if not _ytdlp_has_playable_formats(ytdlp_res):
+        yt_fallback_clients = (
+            ["youtube:player_client=ios", "youtube:player_client=android", "youtube:player_client=tv,web_safari"]
+            if no_js_yt
+            else ["youtube:player_client=android_vr,tv,web_safari,web"]
+        )
+        for yt_client_spec in yt_fallback_clients:
+            try:
+                ytdlp_res = _run_ytdlp_info_raw(
+                    url,
+                    allow_playlist=allow_pl,
+                    use_cookies=False,
+                    extra_args=["--extractor-args", yt_client_spec],
+                )
+                if _ytdlp_has_playable_formats(ytdlp_res):
+                    break
                 ytdlp_res = None
-        except Exception as exc:
-            if not last_error:
-                last_error = str(exc)
+            except Exception as exc:
+                if not last_error:
+                    last_error = str(exc)
 
     # Stage 2: Toggle cookies fallback (with cookies on YT for age-gated/private/bot-check; without cookies on other sites)
     if ytdlp_res is None and use_ck and not (_is_facebook_url(url) and "/stories/" in url.lower()):
@@ -5593,10 +6056,53 @@ def _run_info_uncached(url: str, referer: str = "", extra_cookies: str = "", tit
 
 
 def _update_job(job_id: str, **kwargs):
+    snap = None
+    notify = False
     with JOBS_LOCK:
         job = JOBS.get(job_id)
         if job is not None:
+            prev_status = job.get("status")
             job.update(kwargs)
+            cur_status = job.get("status")
+            # Notify Android on status transitions or progress field changes (skip internal-only updates like _proc)
+            if cur_status != prev_status or any(
+                k in kwargs for k in ("percent", "stage", "downloaded_text", "speed_text", "error")
+            ):
+                if cur_status in ("done", "error", "cancelled"):
+                    if job.get("_android_final_sent") != cur_status:
+                        job["_android_final_sent"] = cur_status
+                        snap = dict(job)
+                        notify = True
+                elif cur_status in ("starting", "downloading", "postprocessing"):
+                    snap = dict(job)
+                    notify = True
+    if notify and snap is not None:
+        _notify_android_job_snapshot(snap)
+
+
+def cancel_job(job_id: str) -> bool:
+    jid = (job_id or "").strip()
+    if not jid:
+        return False
+    proc = None
+    snap = None
+    with JOBS_LOCK:
+        job = JOBS.get(jid)
+        if not job:
+            return False
+        proc = job.get("_proc")
+        job["status"] = "cancelled"
+        job["stage"] = "Cancelled"
+        job["_android_final_sent"] = "cancelled"
+        snap = dict(job)
+    if proc is not None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    if snap is not None:
+        _notify_android_job_snapshot(snap)
+    return True
 
 
 def _public_job(job: dict) -> dict:
@@ -5982,9 +6488,22 @@ def start_direct_download_job(
             "filename": "",
             "error": "",
             "created_at": time.time(),
+            "retry_payload": {
+                "url": url,
+                "mode": mode or "video",
+                "quality": "direct",
+                "quality_label": quality_label or "",
+                "referer": referer,
+                "direct": True,
+                "audio_url": audio_url,
+                "extra_cookies": extra_cookies,
+                "filename_hint": filename_hint,
+            },
             "_proc": None,
             "_stage_dir": str(out_dir) if stage_chrome else "",
         }
+        _init_snap = dict(JOBS[job_id])
+    _notify_android_job_snapshot(_init_snap)
 
     def worker():
         dest = None
@@ -5992,7 +6511,7 @@ def start_direct_download_job(
         tmp_aud = None
         try:
             # Separate DASH HD Video + Audio (e.g. Facebook 1080p/720p Stories) -> download both & mux via FFmpeg
-            if audio_url and shutil.which("ffmpeg"):
+            if audio_url and _is_ffmpeg_working():
                 base = sanitize_filename(filename_hint or f"story_{int(time.time())}", f"story_{int(time.time())}")
                 dest = out_dir / f"{base}.mp4"
                 if dest.exists():
@@ -6521,17 +7040,58 @@ def start_download_job(
     # - On YouTube/YT Music: try cookie-less first (avoids SABR/PO-Token 'Requested format is not available'),
     #   then explicit android_vr/tv clients + broad format, then with cookies if available (for age-gated/private/bot-check).
     # - On other sites: try with saved cookies first, then without cookies / broad format if format or auth fails.
+    no_js_yt = is_yt and (not _has_js_runtime())
     attempts = []
     if is_yt:
-        attempts.append({"label": "Starting...", "use_cookies": False, "extra_args": None, "broad": False})
-        attempts.append({
-            "label": "Retrying with YouTube compatibility mode...",
-            "use_cookies": False,
-            "extra_args": ["--extractor-args", "youtube:player_client=android_vr,tv,web_safari,web"],
-            "broad": True,
-        })
-        if has_saved_cookies:
-            attempts.append({"label": "Retrying with session cookies...", "use_cookies": True, "extra_args": None, "broad": True})
+        if no_js_yt:
+            # Pure mobile clients (zero JS n-challenge -> avoids HTTP 403 Forbidden on Android!)
+            attempts.append({
+                "label": "Starting...",
+                "use_cookies": False,
+                "extra_args": ["--extractor-args", "youtube:player_client=android_vr"],
+                "broad": False,
+            })
+            attempts.append({
+                "label": "Retrying with YouTube VR stream...",
+                "use_cookies": False,
+                "extra_args": ["--extractor-args", "youtube:player_client=android_vr"],
+                "broad": True,
+            })
+            attempts.append({
+                "label": "Retrying with YouTube iOS client...",
+                "use_cookies": False,
+                "extra_args": ["--extractor-args", "youtube:player_client=ios"],
+                "broad": True,
+            })
+            attempts.append({
+                "label": "Retrying with YouTube Android client...",
+                "use_cookies": False,
+                "extra_args": ["--extractor-args", "youtube:player_client=android"],
+                "broad": True,
+            })
+            if has_saved_cookies:
+                attempts.append({
+                    "label": "Retrying with session cookies...",
+                    "use_cookies": True,
+                    "extra_args": ["--extractor-args", "youtube:player_client=tv,web_safari"],
+                    "broad": True,
+                })
+        else:
+            attempts.append({"label": "Starting...", "use_cookies": False, "extra_args": None, "broad": False})
+            attempts.append({
+                "label": "Retrying with YouTube VR client...",
+                "use_cookies": False,
+                "extra_args": ["--extractor-args", "youtube:player_client=android_vr"],
+                "broad": True,
+            })
+            attempts.append({
+                "label": "Retrying with YouTube compatibility mode...",
+                "use_cookies": False,
+                "extra_args": ["--extractor-args", "youtube:player_client=ios,tv,web_safari"],
+                "broad": True,
+            })
+            if has_saved_cookies:
+                attempts.append({"label": "Retrying with session cookies...", "use_cookies": True, "extra_args": None, "broad": True})
     else:
         attempts.append({"label": "Starting...", "use_cookies": has_saved_cookies, "extra_args": None, "broad": False})
         if has_saved_cookies:
@@ -6561,9 +7121,24 @@ def start_download_job(
             "filename": "",
             "error": "",
             "created_at": time.time(),
+            "retry_payload": {
+                "url": url,
+                "mode": mode or "video",
+                "quality": quality or "best",
+                "quality_label": quality_label or "",
+                "referer": referer,
+                "direct": False,
+                "audio_url": audio_url,
+                "master_url": master_url,
+                "extra_cookies": extra_cookies,
+                "filename_hint": filename_hint,
+                "playlist_item": playlist_item,
+            },
             "_proc": None,
             "_stage_dir": str(out_dir) if stage_chrome else "",
         }
+        _init_snap2 = dict(JOBS[job_id])
+    _notify_android_job_snapshot(_init_snap2)
 
     class _JobCancelledError(Exception):
         pass
@@ -6588,8 +7163,8 @@ def start_download_job(
         saved_files = []
         last_file = ""
         eff_quality = custom_quality if custom_quality is not None else quality
-        ff_loc = _get_ffmpeg_location()
-        has_ff = bool(ff_loc or shutil.which("ffmpeg"))
+        has_ff = _is_ffmpeg_working()
+        ff_loc = _get_ffmpeg_location() if has_ff else ""
 
         def _prog_hook(d):
             nonlocal last_file
@@ -6692,6 +7267,7 @@ def start_download_job(
             "geo_bypass": True,
             "nocheckcertificate": True,
             "outtmpl": out_tpl,
+            "cachedir": str(APP_DATA_DIR / "ytdlp_cache"),
             "logger": logger,
             "progress_hooks": [_prog_hook],
             "postprocessor_hooks": [_pp_hook],
@@ -6756,14 +7332,25 @@ def start_download_job(
                     {"key": "EmbedThumbnail", "already_have_thumbnail": False},
                 ]
         else:
-            if (not broad_flag) and eff_quality and eff_quality != "best" and not eff_quality.startswith("stream_"):
+            wanted_h, _ = _parse_quality_from_text(quality_label)
+            if not has_ff:
+                # Never request video+audio merging when FFmpeg is unavailable (prevents abort-on-error!)
+                if wanted_h:
+                    ydl_opts["format"] = f"best[height<={wanted_h}][ext=mp4]/best[height<={wanted_h}]/best[ext=mp4]/best"
+                else:
+                    ydl_opts["format"] = "best[ext=mp4]/best"
+            elif (not broad_flag) and eff_quality and eff_quality != "best" and not eff_quality.startswith("stream_"):
                 ydl_opts["format"] = eff_quality
             else:
                 ydl_opts["format_sort"] = ["res", "vcodec:h264", "acodec:aac", "ext:mp4:m4a"]
-                if has_ff:
-                    ydl_opts["format"] = "bestvideo*+bestaudio[ext=m4a]/bestvideo*+bestaudio/best"
+                if wanted_h:
+                    ydl_opts["format"] = (
+                        f"bestvideo*[height<={wanted_h}]+bestaudio[ext=m4a]/"
+                        f"bestvideo*[height<={wanted_h}]+bestaudio/"
+                        f"best[height<={wanted_h}]/best"
+                    )
                 else:
-                    ydl_opts["format"] = "best[ext=mp4]/best"
+                    ydl_opts["format"] = "bestvideo*+bestaudio[ext=m4a]/bestvideo*+bestaudio/best"
             if has_ff:
                 ydl_opts["merge_output_format"] = "mp4"
 
@@ -6960,7 +7547,7 @@ def start_download_job(
                     return
 
             # If this HLS stream has a separate audio_url track (e.g. AWS MediaConvert / MBC VOD), mux both via FFmpeg directly!
-            if is_stream_url and audio_url and mode != "audio" and shutil.which("ffmpeg"):
+            if is_stream_url and audio_url and mode != "audio" and _is_ffmpeg_working():
                 ok_ff0, ff_dest0, _ = _run_ffmpeg_stream_fallback(
                     job_id, url, out_dir, mode, referer, filename_hint, extra_cookies=extra_cookies, audio_url=audio_url
                 )
@@ -7193,7 +7780,7 @@ def start_download_job(
                 return
 
             # Automatic FFmpeg fallback for HLS/DASH streams when yt-dlp times out or fails transport
-            if is_stream_url and shutil.which("ffmpeg"):
+            if is_stream_url and _is_ffmpeg_working():
                 ok_ff, ff_dest, ff_err = _run_ffmpeg_stream_fallback(
                     job_id, url, out_dir, mode, referer, filename_hint, extra_cookies=extra_cookies, audio_url=audio_url
                 )
@@ -7573,7 +8160,8 @@ class Handler(BaseHTTPRequestHandler):
                 "is_desktop": _is_desktop_env(),
                 "os_name": platform.system() or sys.platform,
                 "ytdlp_version": get_ytdlp_version(),
-                "ffmpeg": bool(shutil.which("ffmpeg")),
+                "ffmpeg": _is_ffmpeg_working(),
+                "ffmpeg_diag": _ANDROID_FFMPEG_DIAG,
                 "media_scan": bool(_is_android_app() or shutil.which("termux-media-scan")),
                 "is_android_app": _is_android_app(),
                 "fb_cookies": _has_facebook_auth_cookies(),
@@ -7685,17 +8273,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "removed": removed})
             elif path == "/api/cancel":
                 job_id = (body.get("job_id") or "").strip()
-                with JOBS_LOCK:
-                    job = JOBS.get(job_id)
-                    proc = job.get("_proc") if job else None
-                    if job:
-                        job["status"] = "cancelled"
-                        job["stage"] = "Cancelled"
-                if proc is not None:
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
+                cancel_job(job_id)
                 self._send_json(200, {"ok": True})
             elif path == "/api/engine/update":
                 self._send_json(200, update_ytdlp())

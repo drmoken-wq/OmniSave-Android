@@ -26,17 +26,41 @@ object AndroidBridge {
     }
 
     @JvmStatic
-    fun onDownloadProgress(title: String, stage: String, percent: Int, active: Boolean) {
+    fun onJobProgress(jobId: String, title: String, stage: String, percent: Int, subtext: String) {
         try {
-            OmniSaveService.updateNotification(title, stage, percent, active)
+            OmniSaveService.showJobProgress(jobId, title, stage, percent, subtext)
         } catch (_: Exception) {
         }
     }
 
     @JvmStatic
-    fun onDownloadComplete(title: String, filepath: String) {
+    fun onJobComplete(jobId: String, title: String, filepath: String, sizeText: String) {
         try {
-            OmniSaveService.showDownloadCompleteNotification(title, filepath)
+            OmniSaveService.showJobComplete(jobId, title, filepath, sizeText)
+        } catch (_: Exception) {
+        }
+    }
+
+    @JvmStatic
+    fun onJobError(jobId: String, title: String, errorMsg: String) {
+        try {
+            OmniSaveService.showJobError(jobId, title, errorMsg)
+        } catch (_: Exception) {
+        }
+    }
+
+    @JvmStatic
+    fun onJobCancelled(jobId: String) {
+        try {
+            OmniSaveService.cancelJobNotification(jobId)
+        } catch (_: Exception) {
+        }
+    }
+
+    @JvmStatic
+    fun onEngineSummary(activeCount: Int) {
+        try {
+            OmniSaveService.updateEngineSummary(activeCount)
         } catch (_: Exception) {
         }
     }

@@ -19,19 +19,24 @@ import androidx.core.content.FileProvider
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 class OmniSaveService : Service() {
 
     companion object {
-        // Dedicated port so standalone APK never collides with Termux on port 8000!
         const val PORT = 18980
-        const val CHANNEL_ID = "omnisave_engine_channel"
-        const val DONE_CHANNEL_ID = "omnisave_done_channel"
-        const val NOTIF_ID = 1001
+        const val ENGINE_CHANNEL_ID = "omnisave_engine_channel"
+        // IMPORTANCE_DEFAULT + no sound/vibration keeps live progress bars visible at TOP of One UI / Android 14!
+        const val PROGRESS_CHANNEL_ID = "omnisave_dl_progress_v2"
+        const val ALERT_CHANNEL_ID = "omnisave_done_channel"
+        const val ENGINE_NOTIF_ID = 1001
         const val ACTION_STOP = "com.omnisave.studio.ACTION_STOP"
+        const val ACTION_CANCEL_JOB = "com.omnisave.studio.ACTION_CANCEL_JOB"
+        const val EXTRA_JOB_ID = "job_id"
 
-        private val doneNotifSeq = AtomicInteger(2000)
+        private val alertNotifSeq = AtomicInteger(20000)
+        private val lastJobTickMs = ConcurrentHashMap<String, Long>()
 
         @Volatile
         var isServerThreadRunning: Boolean = false
@@ -39,27 +44,92 @@ class OmniSaveService : Service() {
         @Volatile
         private var activeService: OmniSaveService? = null
 
-        @Volatile
-        private var lastNotifUpdateMs: Long = 0L
-
-        fun updateNotification(title: String, stage: String, percent: Int, active: Boolean) {
-            val svc = activeService ?: return
-            val now = System.currentTimeMillis()
-            if (active && percent in 1..98 && (now - lastNotifUpdateMs) < 450L) {
-                return
-            }
-            lastNotifUpdateMs = now
-            val nm = svc.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-            nm.notify(NOTIF_ID, svc.buildNotification(title, stage, percent, active))
+        private fun progressNotifId(jobId: String): Int {
+            return 3000 + ((jobId.hashCode() and 0x7fffffff) % 10000)
         }
 
-        fun showDownloadCompleteNotification(title: String, filepath: String) {
+        fun updateEngineSummary(activeCount: Int) {
             val svc = activeService ?: return
             val nm = svc.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
-            val file = File(filepath)
-            val label = if (file.name.isNotBlank()) file.name else title
+            val stage = if (activeCount > 0) {
+                if (activeCount == 1) "1 active download running" else "$activeCount active downloads running"
+            } else {
+                "Ready for downloads"
+            }
+            nm.notify(ENGINE_NOTIF_ID, svc.buildEngineNotification(stage))
+        }
 
-            val nid = doneNotifSeq.incrementAndGet()
+        fun showJobProgress(jobId: String, title: String, stage: String, percent: Int, subtext: String) {
+            val svc = activeService ?: return
+            val now = System.currentTimeMillis()
+            val prev = lastJobTickMs[jobId] ?: 0L
+            if (percent in 1..98 && (now - prev) < 400L) {
+                return
+            }
+            lastJobTickMs[jobId] = now
+
+            val nm = svc.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            val nid = progressNotifId(jobId)
+
+            val openIntent = Intent(svc, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val openPending = PendingIntent.getActivity(
+                svc,
+                nid,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val cancelIntent = Intent(svc, OmniSaveService::class.java).apply {
+                action = ACTION_CANCEL_JOB
+                putExtra(EXTRA_JOB_ID, jobId)
+            }
+            val cancelPending = PendingIntent.getService(
+                svc,
+                nid + 50000,
+                cancelIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val clamped = percent.coerceIn(0, 100)
+            val pctPrefix = if (clamped > 0) "$clamped% · " else ""
+            val bodyLine = if (subtext.isNotBlank()) "$pctPrefix$subtext" else "$pctPrefix$stage"
+
+            val notif = NotificationCompat.Builder(svc, PROGRESS_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_omnisave)
+                .setContentTitle(if (title.isNotBlank()) title else "Downloading...")
+                .setContentText(bodyLine)
+                .setContentIntent(openPending)
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .setSilent(true)
+                .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+                .setProgress(100, clamped, clamped == 0)
+                .addAction(0, "Cancel", cancelPending)
+                .build()
+
+            nm.notify(nid, notif)
+        }
+
+        fun cancelJobNotification(jobId: String) {
+            val svc = activeService ?: return
+            lastJobTickMs.remove(jobId)
+            val nm = svc.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            nm.cancel(progressNotifId(jobId))
+        }
+
+        fun showJobComplete(jobId: String, title: String, filepath: String, sizeText: String) {
+            val svc = activeService ?: return
+            lastJobTickMs.remove(jobId)
+            val nm = svc.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            nm.cancel(progressNotifId(jobId))
+
+            val file = File(filepath)
+            val baseName = if (file.name.isNotBlank()) file.name else title
+            val label = if (sizeText.isNotBlank() && sizeText != "0 MB") "$baseName ($sizeText)" else baseName
+
+            val nid = alertNotifSeq.incrementAndGet()
             var tapPending: PendingIntent? = null
             try {
                 if (file.exists()) {
@@ -79,12 +149,57 @@ class OmniSaveService : Service() {
             } catch (_: Exception) {
             }
 
-            val notif = NotificationCompat.Builder(svc, DONE_CHANNEL_ID)
+            if (tapPending == null) {
+                val appIntent = Intent(svc, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                tapPending = PendingIntent.getActivity(
+                    svc,
+                    nid,
+                    appIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            }
+
+            val notif = NotificationCompat.Builder(svc, ALERT_CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_omnisave)
                 .setContentTitle("Download Complete ✓")
                 .setContentText(label)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(label))
                 .setAutoCancel(true)
-                .apply { if (tapPending != null) setContentIntent(tapPending) }
+                .setContentIntent(tapPending)
+                .build()
+
+            nm.notify(nid, notif)
+        }
+
+        fun showJobError(jobId: String, title: String, errorMsg: String) {
+            val svc = activeService ?: return
+            lastJobTickMs.remove(jobId)
+            val nm = svc.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            nm.cancel(progressNotifId(jobId))
+
+            val nid = alertNotifSeq.incrementAndGet()
+            val openIntent = Intent(svc, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val openPending = PendingIntent.getActivity(
+                svc,
+                nid,
+                openIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val shortErr = errorMsg.trim().ifBlank { "Download failed" }
+            val headTitle = if (title.isNotBlank()) "Failed: ${title.take(36)}" else "Download Failed ✕"
+
+            val notif = NotificationCompat.Builder(svc, ALERT_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_omnisave)
+                .setContentTitle(headTitle)
+                .setContentText(shortErr)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(shortErr))
+                .setAutoCancel(true)
+                .setContentIntent(openPending)
                 .build()
 
             nm.notify(nid, notif)
@@ -104,19 +219,36 @@ class OmniSaveService : Service() {
         }
         ServiceCompat.startForeground(
             this,
-            NOTIF_ID,
-            buildNotification("OmniSave Studio", "Ready for downloads", 0, false),
+            ENGINE_NOTIF_ID,
+            buildEngineNotification("Ready for downloads"),
             fgType
         )
         startPythonEngineIfNeeded()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopPythonEngine()
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopPythonEngine()
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_CANCEL_JOB -> {
+                val jid = intent.getStringExtra(EXTRA_JOB_ID) ?: ""
+                if (jid.isNotBlank()) {
+                    cancelJobNotification(jid)
+                    Thread {
+                        try {
+                            if (Python.isStarted()) {
+                                Python.getInstance().getModule("omnisave_studio").callAttr("cancel_job", jid)
+                            }
+                        } catch (_: Exception) {
+                        }
+                    }.start()
+                }
+                return START_STICKY
+            }
         }
         startPythonEngineIfNeeded()
         return START_STICKY
@@ -147,6 +279,7 @@ class OmniSaveService : Service() {
 
                 Os.setenv("HOME", filesDir.absolutePath, true)
                 Os.setenv("TMPDIR", cacheDir.absolutePath, true)
+                Os.setenv("XDG_CACHE_HOME", cacheDir.absolutePath, true)
                 Os.setenv("OMNISAVE_ANDROID_APP", "1", true)
                 Os.setenv("OMNISAVE_DATA_DIR", filesDir.absolutePath, true)
                 Os.setenv("OMNISAVE_DOWNLOAD_DIR", dlDir, true)
@@ -159,7 +292,8 @@ class OmniSaveService : Service() {
                 val mod = py.getModule("omnisave_studio")
                 mod.callAttr("start_android_server", PORT)
             } catch (e: Exception) {
-                updateNotification("OmniSave Error", e.message ?: "Engine stopped", 0, false)
+                val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                nm?.notify(ENGINE_NOTIF_ID, buildEngineNotification("Engine error: ${e.message ?: "stopped"}"))
             } finally {
                 isServerThreadRunning = false
             }
@@ -187,27 +321,42 @@ class OmniSaveService : Service() {
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
             val engChannel = NotificationChannel(
-                CHANNEL_ID,
-                "OmniSave Engine & Progress",
+                ENGINE_CHANNEL_ID,
+                "OmniSave Background Engine",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Live progress bar for background downloads"
+                description = "Keeps the local download engine ready in the background"
                 setShowBadge(false)
             }
-            val doneChannel = NotificationChannel(
-                DONE_CHANNEL_ID,
-                "Completed Downloads",
+
+            val progChannel = NotificationChannel(
+                PROGRESS_CHANNEL_ID,
+                "Active Downloads Progress",
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "Alerts when a background download finishes"
+                description = "Live progress bar & speed for active downloads"
+                setSound(null, null)
+                enableVibration(false)
+                setShowBadge(false)
             }
+
+            val alertChannel = NotificationChannel(
+                ALERT_CHANNEL_ID,
+                "Download Completed / Failed Alerts",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Notifies you when a download finishes or fails"
+            }
+
             nm.createNotificationChannel(engChannel)
-            nm.createNotificationChannel(doneChannel)
+            nm.createNotificationChannel(progChannel)
+            nm.createNotificationChannel(alertChannel)
         }
     }
 
-    fun buildNotification(title: String, stage: String, percent: Int, active: Boolean): Notification {
+    fun buildEngineNotification(stageText: String): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -228,30 +377,15 @@ class OmniSaveService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val displayTitle = if (active && title.isNotBlank()) title else "OmniSave Studio"
-        val displayStage = if (active) {
-            if (percent > 0) "$stage ($percent%)" else stage
-        } else {
-            if (stage.isNotBlank()) stage else "Ready"
-        }
-
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+        return NotificationCompat.Builder(this, ENGINE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_omnisave)
-            .setContentTitle(displayTitle)
-            .setContentText(displayStage)
+            .setContentTitle("OmniSave Studio")
+            .setContentText(stageText)
             .setContentIntent(openPending)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .addAction(0, "Stop Engine", stopPending)
-
-        if (active) {
-            val clamped = percent.coerceIn(0, 100)
-            builder.setProgress(100, clamped, clamped == 0)
-        } else {
-            builder.setProgress(0, 0, false)
-        }
-
-        return builder.build()
+            .build()
     }
 }

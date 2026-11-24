@@ -1,7 +1,10 @@
 package com.omnisave.studio
 
 import android.annotation.SuppressLint
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Outline
@@ -43,6 +46,10 @@ class QuickShareActivity : AppCompatActivity() {
     private var sharedText: String = ""
     private var serverReady: Boolean = false
 
+    private val notifPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
     private val cookieLoginLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -64,6 +71,13 @@ class QuickShareActivity : AppCompatActivity() {
         }
 
         ContextCompat.startForegroundService(this, Intent(this, OmniSaveService::class.java))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
 
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.TRANSPARENT)
