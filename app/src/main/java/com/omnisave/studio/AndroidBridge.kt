@@ -32,4 +32,12 @@ object AndroidBridge {
         } catch (_: Exception) {
         }
     }
+
+    @JvmStatic
+    fun onDownloadComplete(title: String, filepath: String) {
+        try {
+            OmniSaveService.showDownloadCompleteNotification(title, filepath)
+        } catch (_: Exception) {
+        }
+    }
 }

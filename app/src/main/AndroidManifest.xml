@@ -40,6 +40,18 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+
+        <!-- SnapTube-style Floating Bottom Sheet for Share Intent -->
+        <activity
+            android:name=".QuickShareActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="OmniSave Download"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:theme="@style/Theme.OmniSave.QuickSheet">
 
             <intent-filter android:label="Download with OmniSave">
                 <action android:name="android.intent.action.SEND" />

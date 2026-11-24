@@ -8,4 +8,17 @@
         <item name="colorPrimaryVariant">#6366F1</item>
         <item name="colorSecondary">#06B6D4</item>
     </style>
+
+    <style name="Theme.OmniSave.QuickSheet" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.55</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">#121420</item>
+        <item name="colorPrimary">#8B5CF6</item>
+        <item name="colorSecondary">#06B6D4</item>
+    </style>
 </resources>

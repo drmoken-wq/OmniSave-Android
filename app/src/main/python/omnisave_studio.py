@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 PORT = 8000
-VERSION = "v20.12"
+VERSION = "v20.13"
 
 
 def _resolve_app_data_dir() -> Path:
@@ -747,6 +747,86 @@ HTML = r"""<!doctype html>
   }
   .switch input:checked + .slider{background:#10b981;border-color:#10b981}
   .switch input:checked + .slider:before{transform:translateX(20px)}
+
+  /* Quick Share Bottom Sheet Mode (?quick=1) */
+  body.quick-mode{
+    min-height:auto;
+    padding:8px 12px 18px;
+    background:#121420;
+  }
+  body.quick-mode .ambient,
+  body.quick-mode .topbar,
+  body.quick-mode .nav-tabs,
+  body.quick-mode .input-shell,
+  body.quick-mode #infoBtn{
+    display:none !important;
+  }
+  body.quick-mode .wrap{max-width:100%}
+  body.quick-mode .panel{
+    background:transparent;
+    border:none;
+    box-shadow:none;
+    backdrop-filter:none;-webkit-backdrop-filter:none;
+    padding:4px 2px 6px;
+    border-radius:0;
+  }
+  body.quick-mode .preview{
+    margin-top:6px;
+    padding-top:6px;
+    border-top:none;
+  }
+  body.quick-mode .media-card{
+    grid-template-columns:108px 1fr;
+    gap:10px;
+    padding:8px;
+  }
+  body.quick-mode .section-lbl{margin:11px 0 6px 2px}
+  body.quick-mode .btn-download{margin-top:12px;height:46px}
+
+  .quick-bar{
+    display:none;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+    padding:2px 2px 10px;
+    margin-bottom:4px;
+    border-bottom:1px solid var(--border);
+  }
+  body.quick-mode .quick-bar{display:flex}
+  .quick-handle{
+    display:none;
+    width:40px;height:4px;border-radius:999px;
+    background:rgba(255,255,255,.24);
+    margin:0 auto 10px;
+  }
+  body.quick-mode .quick-handle{display:block}
+  .quick-title{
+    font-size:14px;font-weight:800;color:var(--txt);
+    display:flex;align-items:center;gap:7px;
+  }
+  .quick-acts{display:flex;align-items:center;gap:6px}
+  .quick-pill{
+    height:30px;padding:0 10px;border-radius:9px;
+    border:1px solid var(--border);background:var(--surface);
+    color:var(--txt-soft);font-size:11.5px;font-weight:700;cursor:pointer;
+  }
+  .quick-login-bar{
+    display:none;margin-top:10px;gap:8px;flex-wrap:wrap;
+  }
+  .android-acct-grid{
+    display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;
+  }
+  .android-login-btn{
+    height:40px !important;
+    border-radius:12px !important;
+    font-weight:700 !important;
+    justify-content:center !important;
+  }
+  .manual-toggle{
+    margin-top:10px;background:none;border:none;padding:4px 0;
+    color:var(--muted);font-size:11.5px;font-weight:700;cursor:pointer;
+    text-decoration:underline;display:none;
+  }
 </style>
 </head>
 <body>
@@ -757,14 +837,25 @@ HTML = r"""<!doctype html>
 </div>
 
 <div class="wrap">
+  <div class="quick-handle"></div>
+  <div class="quick-bar">
+    <span class="quick-title">OmniSave <span class="ver">Quick</span></span>
+    <div class="quick-acts">
+      <button id="quickFullBtn" class="quick-pill" type="button">Full App</button>
+      <button id="quickCloseBtn" class="quick-pill" type="button">✕</button>
+    </div>
+  </div>
   <header class="topbar">
     <div class="brand">
       <div class="logo">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </div>
-      <h1 class="brand-name">OmniSave <span class="ver">Studio</span></h1>
+      <h1 class="brand-name">OmniSave <span class="ver">v20.13</span></h1>
     </div>
     <div class="top-actions">
+      <button id="acctBtn" class="icon-pill" type="button" title="Sign In (Facebook / Instagram / YouTube)" aria-label="Accounts" style="display:none">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      </button>
       <button id="settingsBtn" class="icon-pill" type="button" title="Engine & Cookies" aria-label="Settings">
         <span id="cookieDot" class="dot"></span>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -895,6 +986,12 @@ HTML = r"""<!doctype html>
       </section>
 
       <div id="status" class="status"></div>
+      <div id="quickLoginBar" class="quick-login-bar">
+        <button class="btn-secondary quick-site-login" data-site="facebook" type="button">Sign in Facebook</button>
+        <button class="btn-secondary quick-site-login" data-site="instagram" type="button">Sign in Instagram</button>
+        <button class="btn-secondary quick-site-login" data-site="youtube" type="button">Sign in YouTube</button>
+        <button class="btn-secondary quick-site-login" data-site="tiktok" type="button">Sign in TikTok</button>
+      </div>
     </div>
 
     <!-- TAB 2: WHATSAPP STATUS -->
@@ -1002,13 +1099,14 @@ HTML = r"""<!doctype html>
         </div>
 
         <div id="ckAndroidWrap" style="display:none;margin-top:10px">
-          <p class="set-sub" style="margin:0 0 8px">Sign in directly inside OmniSave to capture session cookies automatically (no manual .txt needed):</p>
-          <div class="set-btns" style="margin-top:0">
-            <button class="btn-secondary android-login-btn" data-site="facebook" type="button">Facebook</button>
-            <button class="btn-secondary android-login-btn" data-site="instagram" type="button">Instagram</button>
-            <button class="btn-secondary android-login-btn" data-site="youtube" type="button">YouTube</button>
-            <button class="btn-secondary android-login-btn" data-site="tiktok" type="button">TikTok</button>
+          <p class="set-sub" style="margin:0 0 6px;color:var(--txt-soft)">Sign in inside OmniSave to capture session cookies automatically:</p>
+          <div class="android-acct-grid">
+            <button class="btn-secondary android-login-btn" data-site="facebook" type="button">Facebook Login</button>
+            <button class="btn-secondary android-login-btn" data-site="instagram" type="button">Instagram Login</button>
+            <button class="btn-secondary android-login-btn" data-site="youtube" type="button">YouTube Login</button>
+            <button class="btn-secondary android-login-btn" data-site="tiktok" type="button">TikTok Login</button>
           </div>
+          <button id="toggleManualCkBtn" class="manual-toggle" type="button">Manual cookies.txt (Advanced) ▾</button>
         </div>
 
         <div id="ckManualWrap">
@@ -1055,7 +1153,16 @@ HTML = r"""<!doctype html>
   var pollTimer = null;
 
   var isDesktop = false;
+  var isAndroidApp = !!(window.OmniSaveAndroid);
+  var isQuickMode = false;
   var cookieSource = "file";
+  try {
+    var _initQs = new URLSearchParams(window.location.search || "");
+    if(_initQs.get("quick") === "1"){
+      isQuickMode = true;
+      document.body.classList.add("quick-mode");
+    }
+  } catch(e) {}
   var lastSavedDir = "";
   var waItems = [];
   var waFilter = "all";
@@ -1215,7 +1322,7 @@ HTML = r"""<!doctype html>
     if(!entries || entries.length <= 1){
       wrap.style.display = "none";
       box.style.display = "none";
-      $("dlBtnText").textContent = "Download";
+      $("dlBtnText").textContent = isQuickMode ? "Download in Background" : "Download";
       return;
     }
 
@@ -1405,6 +1512,7 @@ HTML = r"""<!doctype html>
   $("clearBtn").onclick = function(){
     $("url").value = "";
     resetMediaState();
+    if($("quickLoginBar")) $("quickLoginBar").style.display = "none";
     $("preview").style.display = "none";
     $("progBox").style.display = "none";
     clearStatus();
@@ -1485,7 +1593,13 @@ HTML = r"""<!doctype html>
       }
       $("preview").style.display = "block";
     })
-    .catch(function(e){ setStatus("err", e.message || String(e)); })
+    .catch(function(e){
+      var em = e.message || String(e);
+      setStatus("err", em);
+      if(isQuickMode && window.OmniSaveAndroid && /login|cookie|sign in|story|stories|private|age/i.test(em)){
+        $("quickLoginBar").style.display = "flex";
+      }
+    })
     .finally(function(){ setInspectBusy(false); });
   };
 
@@ -1527,7 +1641,15 @@ HTML = r"""<!doctype html>
         return d;
       });
     })
-    .then(function(d){ activeJobId = d.job_id; pollProgress(activeJobId); })
+    .then(function(d){
+      if(isQuickMode && window.OmniSaveAndroid && window.OmniSaveAndroid.dismissAfterDownload){
+        var ttl = (meta && meta.title) ? meta.title : "Media";
+        window.OmniSaveAndroid.dismissAfterDownload(ttl);
+        return;
+      }
+      activeJobId = d.job_id;
+      pollProgress(activeJobId);
+    })
     .catch(function(e){
       setDownloadButtonsDisabled(false);
       $("progBox").style.display = "none";
@@ -1565,7 +1687,9 @@ HTML = r"""<!doctype html>
     } else {
       $("ckSrcSeg").style.display = "none";
       $("ckBrowserWrap").style.display = "none";
-      $("ckManualWrap").style.display = "block";
+      if(!isAndroidApp){
+        $("ckManualWrap").style.display = "block";
+      }
     }
   }
 
@@ -1574,6 +1698,10 @@ HTML = r"""<!doctype html>
       .then(function(r){ return r.json(); })
       .then(function(d){
         isDesktop = !!d.is_desktop;
+        if(d.is_android_app || window.OmniSaveAndroid){
+          isAndroidApp = true;
+          showAndroidAccountControls();
+        }
         if(isDesktop){
           $("navTabs").style.display = "none";
           switchTab("dl");
@@ -2016,22 +2144,66 @@ HTML = r"""<!doctype html>
     renderWaGrid();
   };
 
-  // Android Native Cookie Login hooks
-  if(window.OmniSaveAndroid){
+  var androidControlsBound = false;
+  function showAndroidAccountControls(){
     var aw = $("ckAndroidWrap");
     if(aw) aw.style.display = "block";
-    var lBtns = document.querySelectorAll(".android-login-btn");
+    var ab = $("acctBtn");
+    if(ab) ab.style.display = "grid";
+    var tm = $("toggleManualCkBtn");
+    if(tm && !androidControlsBound){
+      tm.style.display = "inline-block";
+      $("ckManualWrap").style.display = "none";
+      tm.onclick = function(){
+        var cur = $("ckManualWrap").style.display;
+        $("ckManualWrap").style.display = (cur === "none") ? "block" : "none";
+      };
+    }
+    if(androidControlsBound) return;
+    androidControlsBound = true;
+    if(ab){
+      ab.onclick = function(){
+        setSetStatus("", "");
+        $("setModal").className = "modal open";
+        refreshSettingsUI();
+      };
+    }
+    var lBtns = document.querySelectorAll(".android-login-btn, .quick-site-login");
     for(var li = 0; li < lBtns.length; li++){
       (function(btn){
         btn.onclick = function(){
           var site = btn.getAttribute("data-site") || "facebook";
-          window.OmniSaveAndroid.openCookieLogin(site);
+          if(window.OmniSaveAndroid && window.OmniSaveAndroid.openCookieLogin){
+            window.OmniSaveAndroid.openCookieLogin(site);
+          }
         };
       })(lBtns[li]);
     }
     window.__onOmniCookiesSynced = function(cnt){
       setSetStatus("ok", "Synced " + cnt + " session cookies from login!");
       refreshSettingsUI();
+      if(isQuickMode && ($("url").value || "").trim()){
+        $("quickLoginBar").style.display = "none";
+        $("infoBtn").click();
+      }
+    };
+  }
+
+  if(window.OmniSaveAndroid){
+    showAndroidAccountControls();
+  }
+  if($("quickCloseBtn")){
+    $("quickCloseBtn").onclick = function(){
+      if(window.OmniSaveAndroid && window.OmniSaveAndroid.closeSheet){
+        window.OmniSaveAndroid.closeSheet();
+      }
+    };
+  }
+  if($("quickFullBtn")){
+    $("quickFullBtn").onclick = function(){
+      if(window.OmniSaveAndroid && window.OmniSaveAndroid.openFullApp){
+        window.OmniSaveAndroid.openFullApp(($("url").value || "").trim());
+      }
     };
   }
 
@@ -2360,6 +2532,16 @@ def _notify_android_progress(title: str, stage: str, percent: float, active: boo
         return
     try:
         br.onDownloadProgress(str(title or ""), str(stage or ""), int(round(percent or 0)), bool(active))
+    except Exception:
+        pass
+
+
+def _notify_android_complete(title: str, filepath: str):
+    br = _get_android_bridge()
+    if br is None or not filepath:
+        return
+    try:
+        br.onDownloadComplete(str(title or ""), str(filepath))
     except Exception:
         pass
 
@@ -5884,6 +6066,7 @@ def start_direct_download_job(
                     has_file=True,
                     media_scanned=scanned,
                 )
+                _notify_android_complete(display_title, str(dest))
                 return
 
             # Standard single-file direct download (with automatic chunked &range= support for videoplayback!)
@@ -5932,6 +6115,7 @@ def start_direct_download_job(
                 has_file=True,
                 media_scanned=scanned,
             )
+            _notify_android_complete(display_title, str(dest))
         except Exception as exc:
             _update_job(job_id, status="error", stage="Failed", error=str(exc))
         finally:
@@ -6887,7 +7071,9 @@ def start_download_job(
                     if sz_done:
                         upd_done["downloaded_text"] = sz_done
                     _update_job(job_id, **upd_done)
-                    _notify_android_progress(display_title, "Completed", 100.0, False)
+                    _notify_android_complete(display_title, final_fp)
+                    if not _has_active_jobs():
+                        _notify_android_progress("OmniSave Studio", "Ready", 0.0, False)
                     return
 
                 # Only retry next attempt if error is format/auth/cookie/client related (or YouTube)
@@ -7775,7 +7961,7 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
-def start_android_server(port: int = PORT):
+def start_android_server(port: int = 18980):
     """Entrypoint called by OmniSaveService (Kotlin + Chaquopy) on a background daemon thread."""
     global SERVER_INSTANCE, PORT
     PORT = int(port or 8000)

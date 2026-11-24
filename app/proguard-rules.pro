@@ -1,2 +1,3 @@
 -keep class com.omnisave.studio.AndroidBridge { *; }
 -keep class com.omnisave.studio.MainActivity$WebAppBridge { *; }
+-keep class com.omnisave.studio.QuickShareActivity$QuickBridge { *; }

@@ -39,6 +39,10 @@ import java.net.URLEncoder
 
 class MainActivity : AppCompatActivity() {
 
+    companion object {
+        const val EXTRA_OPEN_URL = "open_url"
+    }
+
     private lateinit var webView: WebView
     private lateinit var splashOverlay: LinearLayout
     private lateinit var splashStatus: TextView
@@ -247,6 +251,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun extractSharedUrl(intent: Intent?): String? {
         if (intent == null) return null
+        val directUrl = intent.getStringExtra(EXTRA_OPEN_URL)?.trim()
+        if (!directUrl.isNullOrEmpty()) return directUrl
         if (intent.action == Intent.ACTION_SEND && intent.type == "text/plain") {
             val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
             if (!text.isNullOrEmpty()) return text

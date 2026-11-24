@@ -12,18 +12,26 @@ import android.os.Build
 import android.os.Environment
 import android.os.IBinder
 import android.system.Os
+import android.webkit.MimeTypeMap
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.FileProvider
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 class OmniSaveService : Service() {
 
     companion object {
-        const val PORT = 8000
+        // Dedicated port so standalone APK never collides with Termux on port 8000!
+        const val PORT = 18980
         const val CHANNEL_ID = "omnisave_engine_channel"
+        const val DONE_CHANNEL_ID = "omnisave_done_channel"
         const val NOTIF_ID = 1001
         const val ACTION_STOP = "com.omnisave.studio.ACTION_STOP"
+
+        private val doneNotifSeq = AtomicInteger(2000)
 
         @Volatile
         var isServerThreadRunning: Boolean = false
@@ -44,13 +52,50 @@ class OmniSaveService : Service() {
             val nm = svc.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             nm.notify(NOTIF_ID, svc.buildNotification(title, stage, percent, active))
         }
+
+        fun showDownloadCompleteNotification(title: String, filepath: String) {
+            val svc = activeService ?: return
+            val nm = svc.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            val file = File(filepath)
+            val label = if (file.name.isNotBlank()) file.name else title
+
+            val nid = doneNotifSeq.incrementAndGet()
+            var tapPending: PendingIntent? = null
+            try {
+                if (file.exists()) {
+                    val uri = FileProvider.getUriForFile(svc, "${svc.packageName}.fileprovider", file)
+                    val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase()) ?: "*/*"
+                    val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, mime)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    tapPending = PendingIntent.getActivity(
+                        svc,
+                        nid,
+                        viewIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                    )
+                }
+            } catch (_: Exception) {
+            }
+
+            val notif = NotificationCompat.Builder(svc, DONE_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_stat_omnisave)
+                .setContentTitle("Download Complete ✓")
+                .setContentText(label)
+                .setAutoCancel(true)
+                .apply { if (tapPending != null) setContentIntent(tapPending) }
+                .build()
+
+            nm.notify(nid, notif)
+        }
     }
 
     override fun onCreate() {
         super.onCreate()
         activeService = this
         AndroidBridge.init(applicationContext)
-        createNotificationChannel()
+        createNotificationChannels()
 
         val fgType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
@@ -60,7 +105,7 @@ class OmniSaveService : Service() {
         ServiceCompat.startForeground(
             this,
             NOTIF_ID,
-            buildNotification("OmniSave Studio", "Engine running in background", 0, false),
+            buildNotification("OmniSave Studio", "Ready for downloads", 0, false),
             fgType
         )
         startPythonEngineIfNeeded()
@@ -139,18 +184,26 @@ class OmniSaveService : Service() {
         }.start()
     }
 
-    private fun createNotificationChannel() {
+    private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val engChannel = NotificationChannel(
                 CHANNEL_ID,
-                "OmniSave Engine & Downloads",
+                "OmniSave Engine & Progress",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Keeps OmniSave downloads running smoothly in the background"
+                description = "Live progress bar for background downloads"
                 setShowBadge(false)
             }
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.createNotificationChannel(channel)
+            val doneChannel = NotificationChannel(
+                DONE_CHANNEL_ID,
+                "Completed Downloads",
+                NotificationManager.IMPORTANCE_DEFAULT
+            ).apply {
+                description = "Alerts when a background download finishes"
+            }
+            nm.createNotificationChannel(engChannel)
+            nm.createNotificationChannel(doneChannel)
         }
     }
 
