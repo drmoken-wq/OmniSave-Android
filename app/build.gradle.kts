@@ -12,8 +12,8 @@ android {
         applicationId = "com.omnisave.studio"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
-        versionName = "20.15"
+        versionCode = 5
+        versionName = "20.16"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -54,6 +54,7 @@ chaquopy {
         version = "3.11"
         pip {
             install("yt-dlp")
+            install("yt-dlp-ejs")
             install("mutagen")
         }
     }

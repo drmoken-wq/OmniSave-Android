@@ -194,3 +194,7 @@ ls -lh "$OUT_DIR"
 file "$OUT_DIR/libffmpeg.so"
 readelf -l "$OUT_DIR/libffmpeg.so" | grep -i interpreter || true
 readelf -d "$OUT_DIR/libffmpeg.so" | grep NEEDED || true
+
+if [ -f "scripts/build_qjs_android.sh" ]; then
+    bash scripts/build_qjs_android.sh
+fi

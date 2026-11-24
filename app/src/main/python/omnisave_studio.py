@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 PORT = 8000
-VERSION = "v20.15"
+VERSION = "v20.16"
 
 
 def _resolve_app_data_dir() -> Path:
@@ -920,7 +920,7 @@ HTML = r"""<!doctype html>
       <div class="logo">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </div>
-      <h1 class="brand-name">OmniSave <span class="ver">v20.15</span></h1>
+      <h1 class="brand-name">OmniSave <span class="ver">v20.16</span></h1>
     </div>
     <div class="top-actions">
       <button id="acctBtn" class="icon-pill" type="button" title="Sign In (Facebook / Instagram / YouTube)" aria-label="Accounts" style="display:none">
@@ -2018,7 +2018,8 @@ HTML = r"""<!doctype html>
           ? (" · Desktop (" + (d.os_name || "PC") + ")")
           : (" · Gallery Sync " + (d.media_scan ? "Auto" : "Manual"));
         var ffTxt = d.ffmpeg ? "OK" : ("Missing" + (d.ffmpeg_diag ? (" (" + d.ffmpeg_diag + ")") : ""));
-        $("engVer").textContent = "yt-dlp " + (d.ytdlp_version || "unknown") + " · FFmpeg " + ffTxt + syncPart;
+        var jsTxt = d.js_runtime ? (" · JS (" + (d.js_runtime_name || "OK") + ")") : " · JS Off";
+        $("engVer").textContent = "yt-dlp " + (d.ytdlp_version || "unknown") + " · FFmpeg " + ffTxt + jsTxt + syncPart;
 
         $("ckToggle").checked = !!d.use_cookies;
         $("cookieDot").style.display = (d.use_cookies && d.has_cookies) ? "block" : "none";
@@ -2776,10 +2777,109 @@ def _is_desktop_env() -> bool:
 
 _ANDROID_FFMPEG_OK = False
 _ANDROID_FFMPEG_DIAG = ""
+_ANDROID_QJS_PATH = ""
+_ANDROID_QJS_OK = False
+_ANDROID_QJS_DIAG = ""
+
+
+def _probe_qjs_executable(qjs_path: Path) -> tuple:
+    if not qjs_path or not qjs_path.exists():
+        return False, "missing"
+    try:
+        p = subprocess.run(
+            [str(qjs_path), "-e", "console.log(40+2)"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=clean_env(),
+            timeout=10,
+            **_win_popen_kwargs(),
+        )
+        if p.returncode == 0 and "42" in (p.stdout or ""):
+            return True, "QuickJS OK"
+        # Fallback syntax check (older bellard qjs uses print())
+        p2 = subprocess.run(
+            [str(qjs_path), "-e", "print(40+2)"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=clean_env(),
+            timeout=10,
+            **_win_popen_kwargs(),
+        )
+        if p2.returncode == 0 and "42" in (p2.stdout or ""):
+            return True, "QuickJS OK"
+        err = (p.stderr or p2.stderr or f"rc={p.returncode}").strip().splitlines()
+        return False, (err[0][:100] if err else f"rc={p.returncode}")
+    except Exception as exc:
+        return False, str(exc)[:100]
+
+
+def _setup_android_qjs() -> str:
+    global _ANDROID_QJS_PATH, _ANDROID_QJS_OK, _ANDROID_QJS_DIAG
+    _ANDROID_QJS_PATH = ""
+    _ANDROID_QJS_OK = False
+    _ANDROID_QJS_DIAG = ""
+
+    native_dir_s = (os.environ.get("OMNISAVE_NATIVE_LIB_DIR") or "").strip()
+    if not native_dir_s:
+        return ""
+    native_dir = Path(native_dir_s)
+    src_so = native_dir / "libqjs.so"
+    if not src_so.exists():
+        _ANDROID_QJS_DIAG = "not bundled"
+        return ""
+
+    bin_dir = APP_DATA_DIR / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    dst_link = bin_dir / "qjs"
+    try:
+        if dst_link.is_symlink() or dst_link.exists():
+            dst_link.unlink()
+        os.symlink(str(src_so), str(dst_link))
+    except Exception:
+        pass
+
+    bin_s = str(bin_dir)
+    cur_path = os.environ.get("PATH") or ""
+    if bin_s not in cur_path.split(os.pathsep):
+        os.environ["PATH"] = f"{bin_s}{os.pathsep}{cur_path}" if cur_path else bin_s
+
+    for cand in (dst_link, src_so):
+        ok, diag = _probe_qjs_executable(cand)
+        if ok:
+            _ANDROID_QJS_PATH = str(cand)
+            _ANDROID_QJS_OK = True
+            _ANDROID_QJS_DIAG = diag
+            return _ANDROID_QJS_PATH
+        _ANDROID_QJS_DIAG = diag
+    return ""
+
+
+def _get_js_runtime_opts() -> dict:
+    if _is_android_app():
+        if not _ANDROID_QJS_OK and not _ANDROID_QJS_DIAG:
+            _setup_android_qjs()
+        if _ANDROID_QJS_OK and _ANDROID_QJS_PATH:
+            return {"quickjs": {"path": _ANDROID_QJS_PATH}}
+        return {}
+    for rt_name, bins in (
+        ("deno", ("deno",)),
+        ("node", ("node", "nodejs")),
+        ("bun", ("bun",)),
+        ("quickjs", ("qjs", "quickjs")),
+    ):
+        for b in bins:
+            found = shutil.which(b)
+            if found:
+                return {rt_name: {"path": found}}
+    return {}
 
 
 def _has_js_runtime() -> bool:
-    return any(bool(shutil.which(b)) for b in ("deno", "node", "nodejs", "bun", "qjs"))
+    return bool(_get_js_runtime_opts())
 
 
 def _probe_ffmpeg_executable(ff_path: Path) -> tuple:
@@ -5809,6 +5909,11 @@ def _run_ytdlp_info_inprocess(ymod, url: str, allow_playlist: bool, use_cookies:
     if ext_args_dict:
         ydl_opts["extractor_args"] = ext_args_dict
 
+    js_rt = _get_js_runtime_opts()
+    if js_rt:
+        ydl_opts["js_runtimes"] = js_rt
+        ydl_opts["remote_components"] = ["ejs:github"]
+
     ck_cli = get_ytdlp_cookie_cli_args(use_cookies)
     if len(ck_cli) >= 2:
         if ck_cli[0] == "--cookies":
@@ -5870,6 +5975,10 @@ def _run_ytdlp_info_raw(url: str, allow_playlist: bool, use_cookies: bool, refer
             orig = _origin_from_url(referer)
             if orig:
                 cmd += ["--add-header", f"Origin:{orig}"]
+    js_rt_cli = _get_js_runtime_opts()
+    if js_rt_cli:
+        for _rk, _rv in js_rt_cli.items():
+            cmd += ["--js-runtimes", f"{_rk}:{_rv['path']}", "--remote-components", "ejs:github"]
     if extra_args:
         cmd += list(extra_args)
     cmd += get_ytdlp_cookie_cli_args(use_cookies)
@@ -5948,57 +6057,95 @@ def _run_info_uncached(url: str, referer: str = "", extra_cookies: str = "", tit
 
     is_yt = _is_youtube_url(url)
 
-    def _ytdlp_has_playable_formats(res: dict) -> bool:
+    def _ytdlp_format_quality_score(res: dict) -> tuple:
+        """Return (max_height, format_count) so we never stop at 360p-only when HD clients have 1080p/720p!"""
         if not res:
-            return False
+            return (0, 0)
         if len(res.get("entries") or []) > 1:
-            return True
+            return (1080, len(res.get("entries") or []))
         real_v = [f for f in (res.get("formats") or []) if f.get("id") != "best"]
-        return bool(real_v or res.get("audio_size"))
+        max_h = 0
+        for f in real_v:
+            q, _ = _parse_quality_from_text(f.get("name") or "")
+            if q and q > max_h:
+                max_h = q
+        return (max_h, len(real_v) + (1 if res.get("audio_size") else 0))
+
+    def _ytdlp_has_playable_formats(res: dict) -> bool:
+        h, cnt = _ytdlp_format_quality_score(res)
+        return cnt > 0
+
+    def _ytdlp_has_hd_or_multi(res: dict) -> bool:
+        h, cnt = _ytdlp_format_quality_score(res)
+        return (h >= 720) or (cnt >= 3)
+
+    best_yt_candidate = None
+    best_yt_score = (0, 0)
+
+    def _consider_yt(cand: dict):
+        nonlocal best_yt_candidate, best_yt_score
+        sc = _ytdlp_format_quality_score(cand)
+        if sc > best_yt_score:
+            best_yt_candidate = cand
+            best_yt_score = sc
 
     # Stage 1: Primary yt-dlp extraction
-    # On YouTube without a JS runtime (e.g. Android Chaquopy APK), use pure android_vr first so fetched
-    # formats never rely on web n-challenge JS solving (which causes HTTP 403 Forbidden on download!).
+    # With JS runtime (QuickJS/Deno/Node), yt-dlp's default clients return ALL qualities (4K/1080p/720p/480p/360p) cleanly!
+    # Without JS runtime, combine android_vr,ios,tv_simply,web_safari so we don't get stuck on 360p-only.
     no_js_yt = is_yt and (not _has_js_runtime())
     first_use_ck = False if is_yt else use_ck
-    first_extra = ["--extractor-args", "youtube:player_client=android_vr"] if no_js_yt else None
+    first_extra = ["--extractor-args", "youtube:player_client=android_vr,ios,tv_simply"] if no_js_yt else None
     try:
-        ytdlp_res = _run_ytdlp_info_raw(url, allow_playlist=allow_pl, use_cookies=first_use_ck, extra_args=first_extra)
-        if is_yt and not _ytdlp_has_playable_formats(ytdlp_res):
-            ytdlp_res = None
+        cand1 = _run_ytdlp_info_raw(url, allow_playlist=allow_pl, use_cookies=first_use_ck, extra_args=first_extra)
+        if is_yt:
+            _consider_yt(cand1)
+            if _ytdlp_has_hd_or_multi(cand1):
+                ytdlp_res = cand1
+        else:
+            ytdlp_res = cand1
     except Exception as exc:
         last_error = str(exc)
 
-    # Stage 1.5 (YouTube): Fallback clients (pure mobile clients first when no JS runtime, then tv/web)
+    # Stage 1.5 (YouTube): If Stage 1 failed OR only returned <=360p, probe multi-client fallback for HD formats!
     if ytdlp_res is None and is_yt:
         yt_fallback_clients = (
-            ["youtube:player_client=ios", "youtube:player_client=android", "youtube:player_client=tv,web_safari"]
+            ["youtube:player_client=web_safari,tv,android", "youtube:player_client=android_vr,web"]
             if no_js_yt
-            else ["youtube:player_client=android_vr,tv,web_safari,web"]
+            else ["youtube:player_client=android_vr,tv,web_safari,ios", "youtube:player_client=web,mweb"]
         )
         for yt_client_spec in yt_fallback_clients:
             try:
-                ytdlp_res = _run_ytdlp_info_raw(
+                cand_fb = _run_ytdlp_info_raw(
                     url,
                     allow_playlist=allow_pl,
                     use_cookies=False,
                     extra_args=["--extractor-args", yt_client_spec],
                 )
-                if _ytdlp_has_playable_formats(ytdlp_res):
+                _consider_yt(cand_fb)
+                if _ytdlp_has_hd_or_multi(cand_fb):
+                    ytdlp_res = cand_fb
                     break
-                ytdlp_res = None
             except Exception as exc:
                 if not last_error:
                     last_error = str(exc)
 
-    # Stage 2: Toggle cookies fallback (with cookies on YT for age-gated/private/bot-check; without cookies on other sites)
+    # Stage 2: Toggle cookies fallback (with cookies on YT for age-gated/private/HD; without cookies on other sites)
     if ytdlp_res is None and use_ck and not (_is_facebook_url(url) and "/stories/" in url.lower()):
         second_use_ck = True if is_yt else False
         try:
-            ytdlp_res = _run_ytdlp_info_raw(url, allow_playlist=allow_pl, use_cookies=second_use_ck)
+            cand2 = _run_ytdlp_info_raw(url, allow_playlist=allow_pl, use_cookies=second_use_ck)
+            if is_yt:
+                _consider_yt(cand2)
+                if _ytdlp_has_hd_or_multi(cand2):
+                    ytdlp_res = cand2
+            else:
+                ytdlp_res = cand2
         except Exception as exc:
             if not last_error:
                 last_error = str(exc)
+
+    if ytdlp_res is None and best_yt_candidate is not None and _ytdlp_has_playable_formats(best_yt_candidate):
+        ytdlp_res = best_yt_candidate
 
     # Stage 2.5: If yt-dlp failed on a Facebook URL that redirected to login.php or is a story, give clear FB guidance
     if ytdlp_res is None and _is_facebook_url(url):
@@ -7048,7 +7195,7 @@ def start_download_job(
             attempts.append({
                 "label": "Starting...",
                 "use_cookies": False,
-                "extra_args": ["--extractor-args", "youtube:player_client=android_vr"],
+                "extra_args": ["--extractor-args", "youtube:player_client=android_vr,ios,tv_simply"],
                 "broad": False,
             })
             attempts.append({
@@ -7292,6 +7439,11 @@ def start_download_job(
 
         if ext_args_dict:
             ydl_opts["extractor_args"] = ext_args_dict
+
+        js_rt = _get_js_runtime_opts()
+        if js_rt:
+            ydl_opts["js_runtimes"] = js_rt
+            ydl_opts["remote_components"] = ["ejs:github"]
 
         if use_ck_flag:
             ck_cli = get_ytdlp_cookie_cli_args(True)
@@ -8162,6 +8314,9 @@ class Handler(BaseHTTPRequestHandler):
                 "ytdlp_version": get_ytdlp_version(),
                 "ffmpeg": _is_ffmpeg_working(),
                 "ffmpeg_diag": _ANDROID_FFMPEG_DIAG,
+                "js_runtime": _has_js_runtime(),
+                "js_runtime_name": next(iter(_get_js_runtime_opts().keys()), ""),
+                "js_runtime_diag": _ANDROID_QJS_DIAG,
                 "media_scan": bool(_is_android_app() or shutil.which("termux-media-scan")),
                 "is_android_app": _is_android_app(),
                 "fb_cookies": _has_facebook_auth_cookies(),
@@ -8544,6 +8699,7 @@ def start_android_server(port: int = 18980):
     global SERVER_INSTANCE, PORT
     PORT = int(port or 8000)
     _setup_android_ffmpeg()
+    _setup_android_qjs()
     _rescue_staged_files_to_downloads(only_done_jobs=False)
     if COOKIES_FILE.exists():
         try:
