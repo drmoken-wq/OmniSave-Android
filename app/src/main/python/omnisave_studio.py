@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 PORT = 8000
-VERSION = "v20.16"
+VERSION = "v20.17"
 
 
 def _resolve_app_data_dir() -> Path:
@@ -107,7 +107,13 @@ JOBS_LOCK = threading.Lock()
 
 INFO_CACHE = {}
 INFO_CACHE_LOCK = threading.Lock()
-INFO_CACHE_TTL = 90  # seconds
+INFO_CACHE_TTL = 120  # seconds
+
+RAW_INFO_CACHE = {}
+RAW_INFO_CACHE_LOCK = threading.Lock()
+RAW_INFO_CACHE_TTL = 600  # 10 minutes (stream URLs stay valid for hours)
+
+_HAS_LOCAL_EJS = None
 
 _YTDLP_MOD = None
 _YTDLP_IMPORT_TRIED = False
@@ -156,6 +162,20 @@ def _warmup_ytdlp_async():
 def _clear_info_cache():
     with INFO_CACHE_LOCK:
         INFO_CACHE.clear()
+    with RAW_INFO_CACHE_LOCK:
+        RAW_INFO_CACHE.clear()
+
+
+def _has_local_ejs() -> bool:
+    global _HAS_LOCAL_EJS
+    if _HAS_LOCAL_EJS is not None:
+        return _HAS_LOCAL_EJS
+    try:
+        import importlib.util as _iu
+        _HAS_LOCAL_EJS = _iu.find_spec("yt_dlp_ejs") is not None
+    except Exception:
+        _HAS_LOCAL_EJS = False
+    return _HAS_LOCAL_EJS
 
 WA_MAP = {}
 WA_LOCK = threading.Lock()
@@ -859,7 +879,6 @@ HTML = r"""<!doctype html>
   .job-card{
     padding:12px 13px;border-radius:16px;
     background:var(--surface);border:1px solid var(--border);
-    animation:fadeUp .22s ease;
   }
   .job-card.running{border-color:var(--chip-active-border);background:var(--glass-strong)}
   .job-card.done{border-color:var(--ok-border)}
@@ -920,7 +939,7 @@ HTML = r"""<!doctype html>
       <div class="logo">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </div>
-      <h1 class="brand-name">OmniSave <span class="ver">v20.16</span></h1>
+      <h1 class="brand-name">OmniSave <span class="ver">v20.17</span></h1>
     </div>
     <div class="top-actions">
       <button id="acctBtn" class="icon-pill" type="button" title="Sign In (Facebook / Instagram / YouTube)" aria-label="Accounts" style="display:none">
@@ -1697,9 +1716,129 @@ HTML = r"""<!doctype html>
   };
 
   var queuePollTimer = null;
+  var queuePollInFlight = false;
 
   function stopQueuePolling(){
     if(queuePollTimer){ clearTimeout(queuePollTimer); queuePollTimer = null; }
+  }
+
+  function _buildJobActions(acts, job, isRunning, isDone, isErr, isAndroidBridge, isLocalHost){
+    acts.innerHTML = "";
+    if(isRunning){
+      var cBtn = document.createElement("button");
+      cBtn.type = "button";
+      cBtn.className = "job-btn cancel";
+      cBtn.textContent = "Cancel";
+      cBtn.onclick = function(){
+        cBtn.disabled = true;
+        fetch("/api/cancel", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({job_id: job.job_id})
+        }).finally(function(){ refreshJobsQueue(); });
+      };
+      acts.appendChild(cBtn);
+    } else if(isDone){
+      if(isAndroidBridge && job.filename && job.saved_to){
+        var fullPath = job.saved_to.replace(/\/+$/, "") + "/" + job.filename;
+        var openBtn = document.createElement("button");
+        openBtn.type = "button";
+        openBtn.className = "job-btn primary";
+        openBtn.textContent = "Open / Play";
+        openBtn.onclick = function(){ window.OmniSaveAndroid.openFile(fullPath); };
+        acts.appendChild(openBtn);
+
+        var shareBtn = document.createElement("button");
+        shareBtn.type = "button";
+        shareBtn.className = "job-btn";
+        shareBtn.textContent = "Share";
+        shareBtn.onclick = function(){ window.OmniSaveAndroid.shareFile(fullPath); };
+        acts.appendChild(shareBtn);
+      } else {
+        if(isDesktop && isLocalHost){
+          var foldBtn = document.createElement("button");
+          foldBtn.type = "button";
+          foldBtn.className = "job-btn";
+          foldBtn.textContent = "Open Folder";
+          foldBtn.onclick = function(){
+            fetch("/api/open-folder", {
+              method: "POST",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({path: job.saved_to || ""})
+            }).catch(function(){});
+          };
+          acts.appendChild(foldBtn);
+        }
+        if(job.has_file){
+          var dlLink = document.createElement("a");
+          dlLink.className = "job-btn primary";
+          dlLink.href = "/api/dl/file?id=" + encodeURIComponent(job.job_id) + "&_t=" + Date.now();
+          if(job.filename) dlLink.setAttribute("download", job.filename);
+          dlLink.textContent = isDesktop ? "Download File" : "Save to Gallery";
+          acts.appendChild(dlLink);
+        }
+      }
+    } else if((isErr || job.status === "cancelled") && job.retry_payload){
+      var rBtn = document.createElement("button");
+      rBtn.type = "button";
+      rBtn.className = "job-btn primary";
+      rBtn.textContent = "Retry";
+      rBtn.onclick = function(){
+        rBtn.disabled = true;
+        fetch("/api/download", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(job.retry_payload)
+        }).finally(function(){ refreshJobsQueue(); });
+      };
+      acts.appendChild(rBtn);
+    }
+    acts.style.display = acts.childNodes.length > 0 ? "flex" : "none";
+  }
+
+  function _createJobCard(jobId){
+    var card = document.createElement("div");
+    card.className = "job-card";
+    card.setAttribute("data-job-id", jobId);
+
+    var top = document.createElement("div");
+    top.className = "job-top";
+    var nm = document.createElement("div");
+    nm.className = "job-name";
+    var pctEl = document.createElement("div");
+    pctEl.className = "job-pct";
+    top.appendChild(nm);
+    top.appendChild(pctEl);
+    card.appendChild(top);
+
+    var bar = document.createElement("div");
+    bar.className = "job-bar";
+    var fill = document.createElement("div");
+    fill.className = "job-fill";
+    bar.appendChild(fill);
+    card.appendChild(bar);
+
+    var metaRow = document.createElement("div");
+    metaRow.className = "job-meta";
+    var stg = document.createElement("span");
+    stg.className = "job-stage";
+    var stats = document.createElement("span");
+    stats.className = "job-stats";
+    metaRow.appendChild(stg);
+    metaRow.appendChild(stats);
+    card.appendChild(metaRow);
+
+    var errDiv = document.createElement("div");
+    errDiv.className = "job-err";
+    errDiv.style.display = "none";
+    card.appendChild(errDiv);
+
+    var acts = document.createElement("div");
+    acts.className = "job-acts";
+    card.appendChild(acts);
+
+    card._refs = { nm: nm, pctEl: pctEl, fill: fill, stg: stg, stats: stats, errDiv: errDiv, acts: acts };
+    return card;
   }
 
   function renderJobsQueue(jobs){
@@ -1724,159 +1863,97 @@ HTML = r"""<!doctype html>
     $("queueCount").textContent = runningCnt > 0 ? (runningCnt + " active") : String(jobs.length);
     $("clearDoneBtn").style.display = finishedCnt > 0 ? "inline-block" : "none";
 
-    listEl.innerHTML = "";
     var isLocalHost = (window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost");
     var isAndroidBridge = !!(window.OmniSaveAndroid);
 
+    // Index existing cards by job_id so we NEVER destroy/recreate active cards (zero flicker!)
+    var existingMap = {};
+    var curChildren = listEl.children;
+    for(var c = 0; c < curChildren.length; c++){
+      var cid = curChildren[c].getAttribute("data-job-id");
+      if(cid) existingMap[cid] = curChildren[c];
+    }
+
+    var seenIds = {};
     for(var k = 0; k < jobs.length; k++){
-      (function(job){
-        var isRunning = (job.status === "starting" || job.status === "downloading" || job.status === "postprocessing");
-        var isDone = (job.status === "done");
-        var isErr = (job.status === "error");
+      var job = jobs[k];
+      var jid = job.job_id || ("j_" + k);
+      seenIds[jid] = true;
 
-        var card = document.createElement("div");
-        card.className = "job-card " + (isRunning ? "running" : (isDone ? "done" : (isErr ? "error" : "")));
+      var isRunning = (job.status === "starting" || job.status === "downloading" || job.status === "postprocessing");
+      var isDone = (job.status === "done");
+      var isErr = (job.status === "error");
 
-        var top = document.createElement("div");
-        top.className = "job-top";
+      var card = existingMap[jid];
+      if(!card){
+        card = _createJobCard(jid);
+      }
+      var refs = card._refs;
 
-        var nm = document.createElement("div");
-        nm.className = "job-name";
-        nm.textContent = job.title || job.filename || "Download";
-        top.appendChild(nm);
+      var cls = "job-card " + (isRunning ? "running" : (isDone ? "done" : (isErr ? "error" : "")));
+      if(card.className !== cls) card.className = cls;
 
-        var pctEl = document.createElement("div");
-        pctEl.className = "job-pct";
-        var pct = typeof job.percent === "number" ? job.percent : 0;
-        if(pct < 0) pct = 0;
-        if(pct > 100) pct = 100;
-        pctEl.textContent = isDone ? "Done ✓" : (isErr ? "Failed ✕" : (job.status === "cancelled" ? "Cancelled" : (pct.toFixed(0) + "%")));
-        top.appendChild(pctEl);
-        card.appendChild(top);
+      var nameTxt = job.title || job.filename || "Download";
+      if(refs.nm.textContent !== nameTxt) refs.nm.textContent = nameTxt;
 
-        var bar = document.createElement("div");
-        bar.className = "job-bar";
-        var fill = document.createElement("div");
-        fill.className = "job-fill";
-        fill.style.width = (isDone ? 100 : pct) + "%";
-        bar.appendChild(fill);
-        card.appendChild(bar);
+      var pct = typeof job.percent === "number" ? job.percent : 0;
+      if(pct < 0) pct = 0;
+      if(pct > 100) pct = 100;
+      var pctTxt = isDone ? "Done ✓" : (isErr ? "Failed ✕" : (job.status === "cancelled" ? "Cancelled" : (pct.toFixed(0) + "%")));
+      if(refs.pctEl.textContent !== pctTxt) refs.pctEl.textContent = pctTxt;
 
-        var metaRow = document.createElement("div");
-        metaRow.className = "job-meta";
+      var wStr = (isDone ? 100 : pct) + "%";
+      if(refs.fill.style.width !== wStr) refs.fill.style.width = wStr;
 
-        var stg = document.createElement("span");
-        stg.className = "job-stage";
-        if(isDone){
-          stg.textContent = job.filename ? ("Saved: " + job.filename) : ("Saved to " + (job.saved_to || "Downloads"));
-        } else {
-          stg.textContent = (job.quality_label ? (job.quality_label + " · ") : "") + (job.stage || "Downloading...");
-        }
-        metaRow.appendChild(stg);
+      var stgTxt = isDone
+        ? (job.filename ? ("Saved: " + job.filename) : ("Saved to " + (job.saved_to || "Downloads")))
+        : ((job.quality_label ? (job.quality_label + " · ") : "") + (job.stage || "Downloading..."));
+      if(refs.stg.textContent !== stgTxt) refs.stg.textContent = stgTxt;
 
-        var stats = document.createElement("span");
-        stats.className = "job-stats";
-        if(isRunning){
-          var szTxt = job.total_text ? ((job.downloaded_text || "0 MB") + " / " + job.total_text) : (job.downloaded_text || "0 MB");
-          var spd = (job.speed_text && job.speed_text !== "—") ? (" · " + job.speed_text) : "";
-          var eta = (job.eta_text && job.eta_text !== "—") ? (" · " + job.eta_text) : "";
-          stats.textContent = szTxt + spd + eta;
-        } else if(isDone && job.downloaded_text && job.downloaded_text !== "0 MB"){
-          stats.textContent = job.downloaded_text;
-        }
-        metaRow.appendChild(stats);
-        card.appendChild(metaRow);
+      var statsTxt = "";
+      if(isRunning){
+        var szTxt = job.total_text ? ((job.downloaded_text || "0 MB") + " / " + job.total_text) : (job.downloaded_text || "0 MB");
+        var spd = (job.speed_text && job.speed_text !== "—") ? (" · " + job.speed_text) : "";
+        var eta = (job.eta_text && job.eta_text !== "—") ? (" · " + job.eta_text) : "";
+        statsTxt = szTxt + spd + eta;
+      } else if(isDone && job.downloaded_text && job.downloaded_text !== "0 MB"){
+        statsTxt = job.downloaded_text;
+      }
+      if(refs.stats.textContent !== statsTxt) refs.stats.textContent = statsTxt;
 
-        if(isErr && job.error){
-          var errDiv = document.createElement("div");
-          errDiv.className = "job-err";
-          errDiv.textContent = job.error;
-          card.appendChild(errDiv);
-        }
+      if(isErr && job.error){
+        refs.errDiv.style.display = "block";
+        if(refs.errDiv.textContent !== job.error) refs.errDiv.textContent = job.error;
+      } else {
+        refs.errDiv.style.display = "none";
+      }
 
-        var acts = document.createElement("div");
-        acts.className = "job-acts";
+      // Only rebuild action buttons when state/filename changes!
+      var actSig = (isRunning ? "run" : job.status) + "|" + (job.filename || "") + "|" + (job.has_file ? "1" : "0");
+      if(card._actSig !== actSig){
+        card._actSig = actSig;
+        _buildJobActions(refs.acts, job, isRunning, isDone, isErr, isAndroidBridge, isLocalHost);
+      }
 
-        if(isRunning){
-          var cBtn = document.createElement("button");
-          cBtn.type = "button";
-          cBtn.className = "job-btn cancel";
-          cBtn.textContent = "Cancel";
-          cBtn.onclick = function(){
-            cBtn.disabled = true;
-            fetch("/api/cancel", {
-              method: "POST",
-              headers: {"Content-Type": "application/json"},
-              body: JSON.stringify({job_id: job.job_id})
-            }).finally(function(){ refreshJobsQueue(); });
-          };
-          acts.appendChild(cBtn);
-        } else if(isDone){
-          if(isAndroidBridge && job.filename && job.saved_to){
-            var fullPath = job.saved_to.replace(/\/+$/, "") + "/" + job.filename;
-            var openBtn = document.createElement("button");
-            openBtn.type = "button";
-            openBtn.className = "job-btn primary";
-            openBtn.textContent = "Open / Play";
-            openBtn.onclick = function(){ window.OmniSaveAndroid.openFile(fullPath); };
-            acts.appendChild(openBtn);
+      // Keep DOM order matching server order without detaching existing nodes unnecessarily
+      var atPos = listEl.children[k];
+      if(atPos !== card){
+        listEl.insertBefore(card, atPos || null);
+      }
+    }
 
-            var shareBtn = document.createElement("button");
-            shareBtn.type = "button";
-            shareBtn.className = "job-btn";
-            shareBtn.textContent = "Share";
-            shareBtn.onclick = function(){ window.OmniSaveAndroid.shareFile(fullPath); };
-            acts.appendChild(shareBtn);
-          } else {
-            if(isDesktop && isLocalHost){
-              var foldBtn = document.createElement("button");
-              foldBtn.type = "button";
-              foldBtn.className = "job-btn";
-              foldBtn.textContent = "Open Folder";
-              foldBtn.onclick = function(){
-                fetch("/api/open-folder", {
-                  method: "POST",
-                  headers: {"Content-Type": "application/json"},
-                  body: JSON.stringify({path: job.saved_to || ""})
-                }).catch(function(){});
-              };
-              acts.appendChild(foldBtn);
-            }
-            if(job.has_file){
-              var dlLink = document.createElement("a");
-              dlLink.className = "job-btn primary";
-              dlLink.href = "/api/dl/file?id=" + encodeURIComponent(job.job_id) + "&_t=" + Date.now();
-              if(job.filename) dlLink.setAttribute("download", job.filename);
-              dlLink.textContent = isDesktop ? "Download File" : "Save to Gallery";
-              acts.appendChild(dlLink);
-            }
-          }
-        } else if((isErr || job.status === "cancelled") && job.retry_payload){
-          var rBtn = document.createElement("button");
-          rBtn.type = "button";
-          rBtn.className = "job-btn primary";
-          rBtn.textContent = "Retry";
-          rBtn.onclick = function(){
-            rBtn.disabled = true;
-            fetch("/api/download", {
-              method: "POST",
-              headers: {"Content-Type": "application/json"},
-              body: JSON.stringify(job.retry_payload)
-            }).finally(function(){ refreshJobsQueue(); });
-          };
-          acts.appendChild(rBtn);
-        }
-
-        if(acts.childNodes.length > 0){
-          card.appendChild(acts);
-        }
-        listEl.appendChild(card);
-      })(jobs[k]);
+    // Remove cleared cards no longer returned by /api/jobs
+    for(var idKey in existingMap){
+      if(existingMap.hasOwnProperty(idKey) && !seenIds[idKey]){
+        var rmEl = existingMap[idKey];
+        if(rmEl && rmEl.parentNode === listEl) listEl.removeChild(rmEl);
+      }
     }
   }
 
   function refreshJobsQueue(){
-    if(isQuickMode) return;
+    if(isQuickMode || queuePollInFlight) return;
+    queuePollInFlight = true;
     fetch("/api/jobs", {cache: "no-store"})
       .then(function(r){ return r.json(); })
       .then(function(d){
@@ -1887,10 +1964,11 @@ HTML = r"""<!doctype html>
         });
         stopQueuePolling();
         if(hasRunning){
-          queuePollTimer = setTimeout(refreshJobsQueue, 450);
+          queuePollTimer = setTimeout(refreshJobsQueue, 600);
         }
       })
-      .catch(function(){});
+      .catch(function(){})
+      .finally(function(){ queuePollInFlight = false; });
   }
 
   window.__refreshOmniQueue = refreshJobsQueue;
@@ -5912,7 +5990,8 @@ def _run_ytdlp_info_inprocess(ymod, url: str, allow_playlist: bool, use_cookies:
     js_rt = _get_js_runtime_opts()
     if js_rt:
         ydl_opts["js_runtimes"] = js_rt
-        ydl_opts["remote_components"] = ["ejs:github"]
+        if not _has_local_ejs():
+            ydl_opts["remote_components"] = ["ejs:github"]
 
     ck_cli = get_ytdlp_cookie_cli_args(use_cookies)
     if len(ck_cli) >= 2:
@@ -5937,6 +6016,12 @@ def _run_ytdlp_info_inprocess(ymod, url: str, allow_playlist: bool, use_cookies:
         err_txt = str(exc).strip() or (logger.errors[-1] if logger.errors else "Failed to fetch metadata.")
         raise RuntimeError(err_txt)
 
+    if isinstance(data, dict) and data.get("formats"):
+        with RAW_INFO_CACHE_LOCK:
+            if len(RAW_INFO_CACHE) >= 24:
+                oldest_rk = min(RAW_INFO_CACHE.keys(), key=lambda k: RAW_INFO_CACHE[k][0])
+                RAW_INFO_CACHE.pop(oldest_rk, None)
+            RAW_INFO_CACHE[url] = (time.time(), data)
     return _format_ytdlp_payload(data, url, referer=referer)
 
 
@@ -5988,6 +6073,12 @@ def _run_ytdlp_info_raw(url: str, allow_playlist: bool, use_cookies: bool, refer
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or "Failed to fetch metadata.")
     data = json.loads(proc.stdout)
+    if isinstance(data, dict) and data.get("formats"):
+        with RAW_INFO_CACHE_LOCK:
+            if len(RAW_INFO_CACHE) >= 24:
+                oldest_rk = min(RAW_INFO_CACHE.keys(), key=lambda k: RAW_INFO_CACHE[k][0])
+                RAW_INFO_CACHE.pop(oldest_rk, None)
+            RAW_INFO_CACHE[url] = (time.time(), data)
     return _format_ytdlp_payload(data, url, referer=referer)
 
 
@@ -6090,11 +6181,18 @@ def _run_info_uncached(url: str, referer: str = "", extra_cookies: str = "", tit
             best_yt_score = sc
 
     # Stage 1: Primary yt-dlp extraction
-    # With JS runtime (QuickJS/Deno/Node), yt-dlp's default clients return ALL qualities (4K/1080p/720p/480p/360p) cleanly!
-    # Without JS runtime, combine android_vr,ios,tv_simply,web_safari so we don't get stuck on 360p-only.
+    # On mobile YouTube (single video, not playlist), try fast zero-JS `android_vr` first (~0.8s!):
+    # if it already returns >=720p HD, skip heavy QuickJS solving completely!
+    # Otherwise immediately fall through to full QuickJS-powered default client for 1080p/720p!
     no_js_yt = is_yt and (not _has_js_runtime())
+    fast_mobile_yt = is_yt and _is_mobile_env() and (not allow_pl)
     first_use_ck = False if is_yt else use_ck
-    first_extra = ["--extractor-args", "youtube:player_client=android_vr,ios,tv_simply"] if no_js_yt else None
+    if fast_mobile_yt:
+        first_extra = ["--extractor-args", "youtube:player_client=android_vr;skip=translated_subs"]
+    elif no_js_yt:
+        first_extra = ["--extractor-args", "youtube:player_client=android_vr,ios,tv_simply;skip=translated_subs"]
+    else:
+        first_extra = ["--extractor-args", "youtube:skip=translated_subs"] if is_yt else None
     try:
         cand1 = _run_ytdlp_info_raw(url, allow_playlist=allow_pl, use_cookies=first_use_ck, extra_args=first_extra)
         if is_yt:
@@ -6106,20 +6204,30 @@ def _run_info_uncached(url: str, referer: str = "", extra_cookies: str = "", tit
     except Exception as exc:
         last_error = str(exc)
 
-    # Stage 1.5 (YouTube): If Stage 1 failed OR only returned <=360p, probe multi-client fallback for HD formats!
+    # Stage 1.5 (YouTube): If Stage 1 failed OR only returned <=360p, run QuickJS-powered client for full HD!
     if ytdlp_res is None and is_yt:
-        yt_fallback_clients = (
-            ["youtube:player_client=web_safari,tv,android", "youtube:player_client=android_vr,web"]
-            if no_js_yt
-            else ["youtube:player_client=android_vr,tv,web_safari,ios", "youtube:player_client=web,mweb"]
-        )
-        for yt_client_spec in yt_fallback_clients:
+        if no_js_yt:
+            yt_fallback_clients = [
+                ["--extractor-args", "youtube:player_client=ios,tv_simply,web_safari;skip=translated_subs"],
+                ["--extractor-args", "youtube:player_client=android,web;skip=translated_subs"],
+            ]
+        elif fast_mobile_yt:
+            yt_fallback_clients = [
+                ["--extractor-args", "youtube:player_client=web,web_safari;skip=translated_subs"],
+                ["--extractor-args", "youtube:player_client=tv,ios;skip=translated_subs"],
+            ]
+        else:
+            yt_fallback_clients = [
+                ["--extractor-args", "youtube:player_client=android_vr,tv,web_safari,ios;skip=translated_subs"],
+                ["--extractor-args", "youtube:player_client=web,mweb;skip=translated_subs"],
+            ]
+        for yt_extra in yt_fallback_clients:
             try:
                 cand_fb = _run_ytdlp_info_raw(
                     url,
                     allow_playlist=allow_pl,
                     use_cookies=False,
-                    extra_args=["--extractor-args", yt_client_spec],
+                    extra_args=yt_extra,
                 )
                 _consider_yt(cand_fb)
                 if _ytdlp_has_hd_or_multi(cand_fb):
@@ -6424,6 +6532,349 @@ def _append_range_param(url: str, start: int, end: int) -> str:
     clean = re.sub(r"([?&])range=[^&]*&?", r"\1", url).rstrip("?&")
     sep = "&" if "?" in clean else "?"
     return f"{clean}{sep}range={start}-{end}"
+
+
+def _url_supports_query_range(url: str) -> bool:
+    try:
+        p = urlparse(url)
+        if "videoplayback" not in (p.path or "").lower():
+            return False
+        qs = parse_qs(p.query)
+        sp = (qs.get("sparams") or [""])[0].lower()
+        return "range" not in [x.strip() for x in sp.split(",")]
+    except Exception:
+        return False
+
+
+def _download_parallel_http(
+    job_id: str,
+    url: str,
+    dest: Path,
+    stage_label: str,
+    headers: dict = None,
+    referer: str = "",
+    extra_cookies: str = "",
+    size_hint: int = 0,
+    num_workers: int = 6,
+    chunk_size: int = 1048576,
+    progress_offset_bytes: int = 0,
+    progress_grand_total: int = 0,
+) -> tuple:
+    """Multi-connection parallel HTTP Range downloader (6 threads x 1 MB chunks).
+    Bypasses YouTube's single-stream ~100 KB/s throttle and reaches full Wi-Fi speed.
+    Returns (ok: bool, downloaded_bytes: int, cancelled: bool, err: str).
+    """
+    import queue as _q
+
+    base_hdrs = {
+        "User-Agent": _active_http_ua(),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9,ar;q=0.8",
+        "Accept-Encoding": "identity",
+    }
+    if headers:
+        for k, v in headers.items():
+            if k and v is not None and k.lower() not in ("range", "accept-encoding", "host", "content-length"):
+                base_hdrs[k] = str(v)
+    if referer and "Referer" not in base_hdrs:
+        base_hdrs["Referer"] = referer
+        orig = _origin_from_url(referer)
+        if orig and "Origin" not in base_hdrs:
+            base_hdrs["Origin"] = orig
+    ck = _merge_cookie_headers(cookie_header_for_url(url), extra_cookies)
+    if ck and "Cookie" not in base_hdrs:
+        base_hdrs["Cookie"] = ck
+
+    # 1. Probe range support & exact total_size (supports both &range= for videoplayback & Range header)
+    use_q_range = False
+    total_size = int(size_hint or 0) or _gdrive_clen_from_url(url)
+    probe_ok = False
+
+    if _url_supports_query_range(url):
+        try:
+            probe_u = _append_range_param(url, 0, 1023)
+            req_p = urllib.request.Request(probe_u, headers=dict(base_hdrs), method="GET")
+            with urllib.request.urlopen(req_p, timeout=15, context=_http_context()) as resp_p:
+                sample = resp_p.read(2048)
+                cr = resp_p.headers.get("Content-Range") or ""
+                m_cr = re.search(r"/(\d+)$", cr.strip())
+                if m_cr:
+                    total_size = int(m_cr.group(1))
+                if len(sample) == 1024 and total_size > 1024:
+                    use_q_range = True
+                    probe_ok = True
+        except Exception:
+            pass
+
+    if not probe_ok:
+        try:
+            hdrs_p = dict(base_hdrs)
+            hdrs_p["Range"] = "bytes=0-1023"
+            req_p = urllib.request.Request(url, headers=hdrs_p, method="GET")
+            with urllib.request.urlopen(req_p, timeout=15, context=_http_context()) as resp_p:
+                status_p = int(getattr(resp_p, "status", 200) or 200)
+                cr = resp_p.headers.get("Content-Range") or ""
+                m_cr = re.search(r"/(\d+)$", cr.strip())
+                if m_cr:
+                    total_size = int(m_cr.group(1))
+                if status_p == 206 and total_size > 1024:
+                    use_q_range = False
+                    probe_ok = True
+        except Exception as exc:
+            return False, 0, False, f"Range probe failed: {exc}"
+
+    if not probe_ok or total_size <= 0:
+        return False, 0, False, "Server does not support parallel ranges"
+
+    # Pre-allocate output file to exact total_size
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "wb") as fp:
+        fp.truncate(total_size)
+
+    # Build chunk queue
+    task_q = _q.Queue()
+    pos = 0
+    while pos < total_size:
+        end_b = min(total_size - 1, pos + chunk_size - 1)
+        task_q.put((pos, end_b))
+        pos = end_b + 1
+
+    eff_workers = min(max(1, num_workers), max(1, task_q.qsize()))
+    grand_total = progress_grand_total if progress_grand_total >= total_size else (progress_offset_bytes + total_size)
+
+    lock = threading.Lock()
+    state = {
+        "done_bytes": 0,
+        "failed": False,
+        "err": "",
+        "cancelled": False,
+        "last_ui": 0.0,
+        "start_t": time.time(),
+    }
+
+    _update_job(
+        job_id,
+        status="downloading",
+        stage=stage_label,
+        total_text=fmt_mb(grand_total),
+        filename=dest.name,
+    )
+
+    def _is_cancelled() -> bool:
+        with JOBS_LOCK:
+            return JOBS.get(job_id, {}).get("status") == "cancelled"
+
+    def _record_bytes(n: int):
+        now = time.time()
+        emit = False
+        with lock:
+            state["done_bytes"] += n
+            if now - state["last_ui"] >= 0.25:
+                state["last_ui"] = now
+                cur_done = state["done_bytes"]
+                elapsed = max(0.05, now - state["start_t"])
+                emit = True
+        if emit:
+            overall = progress_offset_bytes + cur_done
+            speed = cur_done / elapsed
+            pct = min(99.5, (overall / grand_total) * 100.0) if grand_total > 0 else 0.0
+            rem = max(0, grand_total - overall)
+            eta = (rem / speed) if speed > 0 else None
+            _update_job(
+                job_id,
+                status="downloading",
+                stage=stage_label,
+                percent=round(pct, 1),
+                downloaded_text=fmt_mb(overall) or "0 MB",
+                total_text=fmt_mb(grand_total),
+                speed_text=fmt_speed(speed),
+                eta_text=fmt_eta(eta),
+            )
+
+    def _worker():
+        while True:
+            if state["failed"] or state["cancelled"] or _is_cancelled():
+                if _is_cancelled():
+                    state["cancelled"] = True
+                return
+            try:
+                start_b, end_b = task_q.get_nowait()
+            except _q.Empty:
+                return
+
+            expected_len = (end_b - start_b) + 1
+            chunk_ok = False
+            last_exc = ""
+            for attempt in range(4):
+                if state["failed"] or state["cancelled"] or _is_cancelled():
+                    if _is_cancelled():
+                        state["cancelled"] = True
+                    return
+                got = 0
+                try:
+                    if use_q_range:
+                        req_u = _append_range_param(url, start_b, end_b)
+                        req_c = urllib.request.Request(req_u, headers=dict(base_hdrs), method="GET")
+                    else:
+                        hdrs_c = dict(base_hdrs)
+                        hdrs_c["Range"] = f"bytes={start_b}-{end_b}"
+                        req_c = urllib.request.Request(url, headers=hdrs_c, method="GET")
+
+                    with urllib.request.urlopen(req_c, timeout=25, context=_http_context()) as resp_c:
+                        with open(dest, "r+b") as fp_w:
+                            fp_w.seek(start_b)
+                            while got < expected_len:
+                                if state["failed"] or state["cancelled"] or _is_cancelled():
+                                    if _is_cancelled():
+                                        state["cancelled"] = True
+                                    return
+                                blk = resp_c.read(min(65536, expected_len - got))
+                                if not blk:
+                                    break
+                                fp_w.write(blk)
+                                got += len(blk)
+                                _record_bytes(len(blk))
+                    if got == expected_len:
+                        chunk_ok = True
+                        break
+                    # Undo partial byte count before retrying this chunk
+                    if got > 0:
+                        with lock:
+                            state["done_bytes"] = max(0, state["done_bytes"] - got)
+                    last_exc = f"Short read {got}/{expected_len}"
+                except Exception as exc:
+                    if got > 0:
+                        with lock:
+                            state["done_bytes"] = max(0, state["done_bytes"] - got)
+                    last_exc = str(exc)
+                    # Don't waste retries on hard 403/404/410
+                    if any(code in last_exc for code in ("403", "404", "410")):
+                        break
+                time.sleep(0.35 * (attempt + 1))
+
+            if not chunk_ok:
+                with lock:
+                    if not state["failed"]:
+                        state["failed"] = True
+                        state["err"] = last_exc or "Chunk download failed"
+                return
+
+    threads = [threading.Thread(target=_worker, daemon=True) for _ in range(eff_workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    if state["cancelled"] or _is_cancelled():
+        try:
+            if dest.exists():
+                dest.unlink()
+        except Exception:
+            pass
+        return False, state["done_bytes"], True, "Cancelled"
+
+    if state["failed"] or not dest.exists() or dest.stat().st_size != total_size:
+        try:
+            if dest.exists():
+                dest.unlink()
+        except Exception:
+            pass
+        return False, state["done_bytes"], False, state["err"] or "Incomplete download"
+
+    return True, total_size, False, ""
+
+
+def _resolve_cached_formats_for_parallel(url: str, mode: str, quality: str, quality_label: str):
+    """Resolve direct HTTPS video (+ optional audio) streams from RAW_INFO_CACHE for instant zero-re-fetch parallel download!"""
+    if mode != "video":
+        return None
+    with RAW_INFO_CACHE_LOCK:
+        entry = RAW_INFO_CACHE.get(url)
+    if not entry or (time.time() - entry[0]) > RAW_INFO_CACHE_TTL:
+        return None
+    data = entry[1]
+    if not isinstance(data, dict):
+        return None
+    raw_formats = data.get("formats") or []
+    if not raw_formats:
+        return None
+
+    def _is_direct_http_fmt(f: dict) -> bool:
+        if not isinstance(f, dict):
+            return False
+        u = str(f.get("url") or "")
+        if not u.startswith(("http://", "https://")):
+            return False
+        proto = str(f.get("protocol") or "").lower()
+        if proto and proto not in ("http", "https"):
+            return False
+        if f.get("fragments"):
+            return False
+        low_u = u.lower()
+        if ".m3u8" in low_u or ".mpd" in low_u:
+            return False
+        return True
+
+    # Find best audio-only stream (prefer m4a/aac for MP4 container copy-mux!)
+    aud_cands = []
+    for f in raw_formats:
+        if f.get("vcodec") == "none" and f.get("acodec") not in (None, "none") and _is_direct_http_fmt(f):
+            ext = (f.get("ext") or "").lower()
+            ac = str(f.get("acodec") or "").lower()
+            is_m4a = 1 if (ext == "m4a" or "mp4a" in ac or "aac" in ac) else 0
+            abr = safe_float(f.get("abr")) or safe_float(f.get("tbr")) or 0.0
+            aud_cands.append((is_m4a, abr, f))
+    aud_cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    best_aud = aud_cands[0][2] if aud_cands else None
+
+    # Find matching video format
+    v_fmt = None
+    if quality and quality != "best" and not quality.startswith("stream_"):
+        # Extract leading format_id from our selector (e.g. "136+bestaudio[ext=m4a]/..." or "18/best")
+        m_fid = re.match(r"^([A-Za-z0-9._-]+)(?:\+|/|$)", quality)
+        if m_fid:
+            wanted_fid = m_fid.group(1)
+            for f in raw_formats:
+                if str(f.get("format_id") or "") == wanted_fid and _is_direct_http_fmt(f):
+                    v_fmt = f
+                    break
+
+    if v_fmt is None:
+        # Match by quality_label height (or best overall)
+        wanted_h, _ = _parse_quality_from_text(quality_label)
+        vid_cands = []
+        for f in raw_formats:
+            if f.get("vcodec") in (None, "none") or not _is_direct_http_fmt(f):
+                continue
+            w = int(safe_float(f.get("width")) or 0)
+            h = int(safe_float(f.get("height")) or 0)
+            q = min(w, h) if (w and h) else h
+            if wanted_h and q and q > wanted_h:
+                continue
+            ext = (f.get("ext") or "").lower()
+            vc = str(f.get("vcodec") or "").lower()
+            is_h264 = 1 if ("avc" in vc or "h264" in vc) else 0
+            is_mp4 = 1 if ext in ("mp4", "m4v") else 0
+            tbr = safe_float(f.get("tbr")) or safe_float(f.get("vbr")) or 0.0
+            vid_cands.append((q, is_h264, is_mp4, tbr, f))
+        if vid_cands:
+            vid_cands.sort(key=lambda x: (x[0], x[1], x[2], x[3]), reverse=True)
+            v_fmt = vid_cands[0][4]
+
+    if v_fmt is None:
+        return None
+
+    needs_audio = (v_fmt.get("acodec") == "none")
+    if needs_audio:
+        if best_aud is None or not _is_ffmpeg_working():
+            return None
+
+    return {
+        "title": data.get("title") or "",
+        "video": v_fmt,
+        "audio": best_aud if needs_audio else None,
+        "base_headers": data.get("http_headers") or {},
+    }
 
 
 def _download_single_direct_stream(job_id: str, url: str, referer: str, dest: Path, stage_label: str, extra_cookies: str = ""):
@@ -7027,7 +7478,8 @@ def _build_ytdlp_download_cmd(
         "--socket-timeout", "30",
         "--retries", "10",
         "--fragment-retries", "10",
-        "--concurrent-fragments", "4",
+        "--concurrent-fragments", "8",
+        "--http-chunk-size", "2M",
         "--geo-bypass",
         "--no-check-certificates",
         "--progress",
@@ -7410,7 +7862,8 @@ def start_download_job(
             "socket_timeout": 30,
             "retries": 10,
             "fragment_retries": 10,
-            "concurrent_fragment_downloads": 4,
+            "concurrent_fragment_downloads": 8,
+            "http_chunk_size": 2097152,
             "geo_bypass": True,
             "nocheckcertificate": True,
             "outtmpl": out_tpl,
@@ -7443,7 +7896,8 @@ def start_download_job(
         js_rt = _get_js_runtime_opts()
         if js_rt:
             ydl_opts["js_runtimes"] = js_rt
-            ydl_opts["remote_components"] = ["ejs:github"]
+            if not _has_local_ejs():
+                ydl_opts["remote_components"] = ["ejs:github"]
 
         if use_ck_flag:
             ck_cli = get_ytdlp_cookie_cli_args(True)
@@ -7697,6 +8151,112 @@ def start_download_job(
                         error=f"This DASH stream uses {drm_lbl} encryption and cannot be downloaded directly.",
                     )
                     return
+
+            # Fast path: Instant 6-thread Parallel HTTP Range Download using cached format URLs (zero re-fetch, full Wi-Fi speed!)
+            if (not is_stream_url) and (not playlist_item) and mode == "video":
+                cached_streams = _resolve_cached_formats_for_parallel(url, mode, quality, quality_label)
+                if cached_streams is not None:
+                    v_f = cached_streams["video"]
+                    a_f = cached_streams["audio"]
+                    base_h = dict(cached_streams.get("base_headers") or {})
+                    v_hdrs = dict(base_h)
+                    v_hdrs.update(v_f.get("http_headers") or {})
+                    v_sz = int(safe_float(v_f.get("filesize")) or safe_float(v_f.get("filesize_approx")) or _gdrive_clen_from_url(v_f["url"]) or 0)
+                    a_sz = int(safe_float(a_f.get("filesize")) or safe_float(a_f.get("filesize_approx")) or _gdrive_clen_from_url(a_f["url"]) or 0) if a_f else 0
+                    grand_tot = v_sz + a_sz
+
+                    safe_base = sanitize_filename(filename_hint or cached_streams.get("title") or "video", f"video_{int(time.time())}")
+                    v_ext = "." + ((v_f.get("ext") or "mp4").lower().lstrip("."))
+                    if a_f is None:
+                        fast_dest = out_dir / f"{safe_base}{v_ext}"
+                        ok_v, dl_v, was_c, _ = _download_parallel_http(
+                            job_id, v_f["url"], fast_dest, "Downloading video (6x)...",
+                            headers=v_hdrs, referer=referer, extra_cookies=extra_cookies,
+                            size_hint=v_sz, num_workers=6, progress_offset_bytes=0, progress_grand_total=v_sz,
+                        )
+                        if was_c:
+                            return
+                        if ok_v and fast_dest.exists() and fast_dest.stat().st_size > 0:
+                            final_f = _finalize_single_file([fast_dest], fast_dest.name) or fast_dest
+                            scanned = _trigger_media_scan([final_f]) if not stage_chrome else False
+                            _update_job(
+                                job_id, status="done", stage="Completed", percent=100.0,
+                                downloaded_text=fmt_mb(final_f.stat().st_size) or "Done",
+                                speed_text="Done", eta_text="00:00",
+                                saved_to=display_dir, filename=final_f.name,
+                                _filepath=str(final_f), has_file=True, media_scanned=scanned,
+                            )
+                            return
+                    else:
+                        tmp_v = out_dir / f".fast_v_{job_id}{v_ext}"
+                        a_ext = "." + ((a_f.get("ext") or "m4a").lower().lstrip("."))
+                        tmp_a = out_dir / f".fast_a_{job_id}{a_ext}"
+                        fast_dest = out_dir / f"{safe_base}.mp4"
+
+                        ok_v, dl_v, was_c, _ = _download_parallel_http(
+                            job_id, v_f["url"], tmp_v, "Downloading video (6x)...",
+                            headers=v_hdrs, referer=referer, extra_cookies=extra_cookies,
+                            size_hint=v_sz, num_workers=6, progress_offset_bytes=0, progress_grand_total=grand_tot,
+                        )
+                        if was_c:
+                            return
+                        ok_a = False
+                        if ok_v:
+                            a_hdrs = dict(base_h)
+                            a_hdrs.update(a_f.get("http_headers") or {})
+                            ok_a, dl_a, was_c, _ = _download_parallel_http(
+                                job_id, a_f["url"], tmp_a, "Downloading audio (4x)...",
+                                headers=a_hdrs, referer=referer, extra_cookies=extra_cookies,
+                                size_hint=a_sz, num_workers=4, progress_offset_bytes=dl_v, progress_grand_total=dl_v + a_sz,
+                            )
+                            if was_c:
+                                return
+
+                        if ok_v and ok_a and tmp_v.exists() and tmp_a.exists():
+                            _update_job(
+                                job_id, status="postprocessing", stage="Merging video + audio...",
+                                percent=99.0, speed_text="FFmpeg", eta_text="—", filename=fast_dest.name,
+                            )
+                            ff_bin = "ffmpeg"
+                            ff_l = _get_ffmpeg_location()
+                            if ff_l:
+                                p_ff = Path(ff_l)
+                                ff_bin = str(p_ff / "ffmpeg") if p_ff.is_dir() else str(p_ff)
+                            mux_ok = False
+                            for mcmd in (
+                                [ff_bin, "-y", "-loglevel", "error", "-i", str(tmp_v), "-i", str(tmp_a), "-c", "copy", "-movflags", "+faststart", str(fast_dest)],
+                                [ff_bin, "-y", "-loglevel", "error", "-i", str(tmp_v), "-i", str(tmp_a), "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(fast_dest)],
+                            ):
+                                proc_m = subprocess.Popen(mcmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", env=clean_env(), **_win_popen_kwargs())
+                                _update_job(job_id, _proc=proc_m)
+                                proc_m.communicate()
+                                if proc_m.returncode == 0 and fast_dest.exists() and fast_dest.stat().st_size > 0:
+                                    mux_ok = True
+                                    break
+                            _update_job(job_id, _proc=None)
+                            for tp in (tmp_v, tmp_a):
+                                try:
+                                    if tp.exists():
+                                        tp.unlink()
+                                except Exception:
+                                    pass
+                            if mux_ok:
+                                final_f = _finalize_single_file([fast_dest], fast_dest.name) or fast_dest
+                                scanned = _trigger_media_scan([final_f]) if not stage_chrome else False
+                                _update_job(
+                                    job_id, status="done", stage="Completed", percent=100.0,
+                                    downloaded_text=fmt_mb(final_f.stat().st_size) or "Done",
+                                    speed_text="Done", eta_text="00:00",
+                                    saved_to=display_dir, filename=final_f.name,
+                                    _filepath=str(final_f), has_file=True, media_scanned=scanned,
+                                )
+                                return
+                        for tp in (tmp_v, tmp_a):
+                            try:
+                                if tp.exists():
+                                    tp.unlink()
+                            except Exception:
+                                pass
 
             # If this HLS stream has a separate audio_url track (e.g. AWS MediaConvert / MBC VOD), mux both via FFmpeg directly!
             if is_stream_url and audio_url and mode != "audio" and _is_ffmpeg_working():
